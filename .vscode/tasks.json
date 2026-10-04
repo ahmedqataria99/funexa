@@ -1,0 +1,482 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "flutter test serial",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "flutter analyze",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"analyze"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "flutter build windows",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"build",
+				"windows"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "flutter test serial",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "flutter analyze",
+			"type": "shell",
+			"command": "flutter analyze",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter build windows",
+			"type": "shell",
+			"command": "flutter build windows",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter test serial",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test all",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter analyze pricing",
+			"type": "shell",
+			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter analyze pricing",
+			"type": "shell",
+			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter test full summary",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; $LASTEXITCODE; Get-Content test-output.txt -Tail 40",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter analyze pricing",
+			"type": "shell",
+			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter test pricing",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "pricing suite",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "pricing suite",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "full regression suite",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "full regression summary",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; echo EXIT:$LASTEXITCODE; Get-Content test-output.txt -Tail 60",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "clear native asset crash",
+			"type": "shell",
+			"command": "Remove-Item -Path \"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\\windows\" -Recurse -Force -ErrorAction SilentlyContinue; Get-ChildItem \"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\" -Force",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "clear native asset crash",
+			"type": "shell",
+			"command": "Remove-Item -LiteralPath 'D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\\windows' -Recurse -Force -ErrorAction SilentlyContinue; Get-ChildItem -LiteralPath 'D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets' -Force",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "clear native asset crash",
+			"type": "shell",
+			"command": "Set-Location 'D:\\avatar\\vs code\\My APPS\\furnexa'; Remove-Item -Recurse -Force .\\build\\native_assets\\windows -ErrorAction SilentlyContinue; Get-ChildItem .\\build\\native_assets -Force",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "clear native asset crash",
+			"type": "shell",
+			"command": "cmd /C \"rmdir /s /q \"\"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\\windows\"\" && dir \"\"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\"\"\"",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter analyze",
+			"type": "shell",
+			"command": "flutter analyze",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "flutter clean",
+			"type": "shell",
+			"command": "flutter clean",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "pricing suite after clean",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "full regression suite after clean",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "full regression summary after clean",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; echo EXIT:$LASTEXITCODE; Get-Content test-output.txt -Tail 40",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Flutter CRM test",
+			"type": "shell",
+			"command": "flutter test test/crm_feature_test.dart",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Flutter full regression",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "full regression serial",
+			"type": "shell",
+			"command": "flutter test --concurrency=1",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "flutter analyze",
+			"type": "shell",
+			"command": "flutter analyze",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "analysis"
+		},
+		{
+			"label": "flutter build windows",
+			"type": "shell",
+			"command": "flutter build windows",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "full regression with exit code",
+			"type": "shell",
+			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; echo EXIT:$LASTEXITCODE; Get-Content test-output.txt -Tail 50",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "CRM Analyze",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"analyze",
+				"lib/features/crm"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Clean stale sqlite3 Windows artifacts",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Remove-Item -Force -Recurse '.\\build\\native_assets\\windows\\sqlite3.dll' -ErrorAction SilentlyContinue; Remove-Item -Force -Recurse '.\\.dart_tool\\hooks_runner\\shared\\sqlite3' -ErrorAction SilentlyContinue; Write-Host 'Cleaned stale sqlite3 native asset cache.'"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Clean stale sqlite3 Windows artifacts",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				" /C ",
+				"cd /d d:\\avatar\\vs code\\My APPS\\furnexa && del /Q /F build\\native_assets\\windows\\sqlite3.dll 2>nul && if exist .dart_tool\\hooks_runner\\shared\\sqlite3 rmdir /S /Q .dart_tool\\hooks_runner\\shared\\sqlite3 && echo Cleaned stale sqlite3 native asset cache."
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Clean stale sqlite3 build cache v2",
+			"type": "shell",
+			"command": "cd /d d:\\avatar\\vs code\\My APPS\\furnexa && del /Q /F build\\native_assets\\windows\\sqlite3.dll 2>nul && if exist .dart_tool\\hooks_runner\\shared\\sqlite3 rmdir /S /Q .dart_tool\\hooks_runner\\shared\\sqlite3 && echo Cleaned stale sqlite3 native asset cache.",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Clean stale sqlite3 build cache v3",
+			"type": "shell",
+			"command": "Set-Location 'd:\\avatar\\vs code\\My APPS\\furnexa'; Remove-Item -Force -ErrorAction SilentlyContinue '.\\build\\native_assets\\windows\\sqlite3.dll'; if (Test-Path '.\\.dart_tool\\hooks_runner\\shared\\sqlite3') { Remove-Item -Recurse -Force '.\\.dart_tool\\hooks_runner\\shared\\sqlite3' }; Write-Host 'Cleaned stale sqlite3 native asset cache.'",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Flutter Build Windows after cleanup",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat build windows",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary H-02 runtime verification",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/production_feature_test.dart",
+				"test/hr_feature_test.dart",
+				"test/costing_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary Accounting payroll validation",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/accounting_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Clean stale sqlite3 build cache final",
+			"type": "shell",
+			"command": "Set-Location 'd:\\avatar\\vs code\\My APPS\\furnexa'; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '.\\build'; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '.\\.dart_tool\\hooks_runner\\shared\\sqlite3'; Write-Host 'Cleaned build and sqlite3 native asset cache.'",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Repair Flutter package cache",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat pub cache repair",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary persistence page integration test",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/database_persistence_integration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary inspect focused widget test process",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name flutter_tester,dart,flutter -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,Path | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary inspect page test log and process",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Content -LiteralPath (Join-Path $env:TEMP 'furnexa-persistence-pages-test.log') -Tail 100 -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('dart.exe','flutter_tester.exe') } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary inspect page test log v2",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Content $env:TEMP\\furnexa-persistence-pages-test.log -Tail 100 -ErrorAction SilentlyContinue; Get-Process -Name flutter_tester,dart -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,Path | Format-List; Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq 7576 } | Select-Object ProcessId,ParentProcessId,CommandLine | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary inspect test parent",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -in @(10208,14920,7576) } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
