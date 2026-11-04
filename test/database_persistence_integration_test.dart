@@ -102,6 +102,14 @@ void main() {
         'createdAt': stamp,
         'updatedAt': stamp,
       });
+      await db.insert('suppliers', {
+        'id': 'persistence-supplier',
+        'name': 'Persistence Test Supplier',
+        'code': 'PERSISTENCE-SUPPLIER',
+        'active': 1,
+        'createdAt': stamp,
+        'updatedAt': stamp,
+      });
 
       final warehouse = Warehouse(
         id: 'persistence-warehouse',
@@ -150,6 +158,7 @@ void main() {
         id: 'persistence-request',
         requestNumber: 'PERSISTENCE-REQUEST',
         requestDate: now,
+        supplierId: 'persistence-supplier',
         requestedBy: 'Persistence Test',
         status: PurchaseRequestStatus.draft,
         createdAt: now,
@@ -301,11 +310,20 @@ void main() {
       quantity: 42,
       date: now,
     );
+    await db.insert('suppliers', {
+      'id': 'page-supplier',
+      'name': 'Page Test Supplier',
+      'code': 'PAGE-SUPPLIER',
+      'active': 1,
+      'createdAt': stamp,
+      'updatedAt': stamp,
+    });
     await PurchasingRepositoryImpl(PurchasingLocalDataSource()).saveRequest(
       PurchaseRequest(
         id: 'page-request',
         requestNumber: 'VISIBLE-REQUEST',
         requestDate: now,
+        supplierId: 'page-supplier',
         requestedBy: 'Page Test',
         status: PurchaseRequestStatus.draft,
         createdAt: now,
@@ -367,6 +385,14 @@ void main() {
       'code': 'SCOPED-MDF',
       'categoryId': 'scoped-category',
       'unitId': 'scoped-unit',
+      'active': 1,
+      'createdAt': stamp,
+      'updatedAt': stamp,
+    });
+    await db.insert('suppliers', {
+      'id': 'scoped-supplier',
+      'name': 'Scoped Supplier',
+      'code': 'SCOPED-SUPPLIER',
       'active': 1,
       'createdAt': stamp,
       'updatedAt': stamp,
@@ -466,6 +492,7 @@ void main() {
       id: 'scoped-request',
       requestNumber: 'SCOPED-REQUEST',
       requestDate: now,
+      supplierId: 'scoped-supplier',
       requestedBy: user.displayName,
       status: PurchaseRequestStatus.draft,
       createdAt: now,

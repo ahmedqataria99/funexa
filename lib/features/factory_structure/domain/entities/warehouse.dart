@@ -1,3 +1,21 @@
+enum WarehousePurpose {
+  sellable('SELLABLE'),
+  quarantine('QUARANTINE'),
+  rework('REWORK'),
+  damaged('DAMAGED');
+
+  const WarehousePurpose(this.value);
+
+  final String value;
+
+  static WarehousePurpose fromStorage(Object? value) => switch (value) {
+    'QUARANTINE' => WarehousePurpose.quarantine,
+    'REWORK' => WarehousePurpose.rework,
+    'DAMAGED' => WarehousePurpose.damaged,
+    _ => WarehousePurpose.sellable,
+  };
+}
+
 class Warehouse {
   Warehouse({
     required this.id,
@@ -5,11 +23,12 @@ class Warehouse {
     required this.name,
     required this.code,
     this.type,
+    this.purpose = WarehousePurpose.sellable,
     this.state = 'active',
     this.notes,
     required this.createdAt,
     required this.updatedAt,
-    }) {
+  }) {
     if (name.trim().isEmpty) throw ArgumentError('اسم المخزن مطلوب');
     if (code.trim().isEmpty) throw ArgumentError('كود المخزن مطلوب');
     if (!const {'active', 'inactive'}.contains(state)) {
@@ -22,6 +41,7 @@ class Warehouse {
   final String name;
   final String code;
   final String? type;
+  final WarehousePurpose purpose;
   final String state;
   final String? notes;
   final DateTime createdAt;
@@ -33,6 +53,7 @@ class Warehouse {
     String? name,
     String? code,
     String? type,
+    WarehousePurpose? purpose,
     String? state,
     String? notes,
     DateTime? createdAt,
@@ -44,6 +65,7 @@ class Warehouse {
       name: name ?? this.name,
       code: code ?? this.code,
       type: type ?? this.type,
+      purpose: purpose ?? this.purpose,
       state: state ?? this.state,
       notes: notes ?? this.notes,
       createdAt: createdAt ?? this.createdAt,
@@ -58,6 +80,7 @@ class Warehouse {
       'name': name.trim(),
       'code': code.trim(),
       'type': type?.trim(),
+      'purpose': purpose.value,
       'state': state,
       'notes': notes?.trim(),
       'createdAt': createdAt.millisecondsSinceEpoch,
@@ -72,6 +95,7 @@ class Warehouse {
       name: map['name'] as String,
       code: map['code'] as String,
       type: map['type'] as String?,
+      purpose: WarehousePurpose.fromStorage(map['purpose']),
       state: map['state'] as String? ?? 'active',
       notes: map['notes'] as String?,
       createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),

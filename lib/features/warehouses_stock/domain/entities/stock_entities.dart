@@ -1,4 +1,21 @@
+import 'package:furnexa/core/inventory/inventory_identity.dart';
+
 enum StockItemType { rawMaterial, product }
+
+String inventoryItemKey({
+  required String productId,
+  required StockItemType type,
+  String? variantId,
+  InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+}) {
+  if (type == StockItemType.rawMaterial) return productId;
+  return switch (identityKind) {
+    InventoryIdentityKind.base => productId,
+    InventoryIdentityKind.variant => '__FURNEXA_VARIANT__:$variantId',
+    InventoryIdentityKind.legacyUnassigned =>
+      '__FURNEXA_LEGACY_UNASSIGNED__:$productId',
+  };
+}
 
 enum StockTransactionType {
   stockIn,
@@ -40,9 +57,15 @@ class StockBalance {
     required this.quantity,
     required this.createdAt,
     required this.updatedAt,
+    this.productId,
+    this.variantId,
+    this.identityKind = InventoryIdentityKind.base,
+    this.unitId,
   });
   final String id, warehouseId, itemId;
+  final String? productId, variantId, unitId;
   final StockItemType itemType;
+  final InventoryIdentityKind identityKind;
   final double quantity;
   final DateTime createdAt, updatedAt;
   factory StockBalance.fromMap(Map<String, Object?> map) => StockBalance(
@@ -55,6 +78,12 @@ class StockBalance {
     quantity: (map['quantity'] as num).toDouble(),
     createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),
     updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updatedAt'] as int),
+    productId: map['productId'] as String?,
+    variantId: map['variantId'] as String?,
+    identityKind: InventoryIdentityKindValue.parse(
+      map['inventoryIdentityKind'],
+    ),
+    unitId: map['unitId'] as String?,
   );
 }
 
@@ -72,8 +101,13 @@ class StockTransaction {
     required this.transactionDate,
     required this.createdAt,
     this.negativeAdjustment = false,
+    this.productId,
+    this.variantId,
+    this.identityKind = InventoryIdentityKind.base,
   });
   final String id, warehouseId, itemId, unitId;
+  final String? productId, variantId;
+  final InventoryIdentityKind identityKind;
   final StockItemType itemType;
   final StockTransactionType transactionType;
   final double quantity;
@@ -99,6 +133,11 @@ class StockTransaction {
           map['transactionDate'] as int,
         ),
         createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt'] as int),
+        productId: map['productId'] as String?,
+        variantId: map['variantId'] as String?,
+        identityKind: InventoryIdentityKindValue.parse(
+          map['inventoryIdentityKind'],
+        ),
         negativeAdjustment:
             map['transactionType'] == 'ADJUSTMENT' &&
             (map['reference'] as String?)?.startsWith('ADJUSTMENT_OUT:') ==
@@ -132,10 +171,24 @@ class StockItemOption {
     required this.unitId,
     required this.type,
     required this.active,
+    this.productId,
+    this.variantId,
+    this.identityKind = InventoryIdentityKind.base,
   });
   final String id, name, code, unitId;
+  final String? productId, variantId;
+  final InventoryIdentityKind identityKind;
   final StockItemType type;
   final bool active;
+
+  String get baseProductId => productId ?? id;
+  String get inventoryId => inventoryItemKey(
+    productId: baseProductId,
+    type: type,
+    variantId: variantId,
+    identityKind: identityKind,
+  );
+  String get selectionId => '$type:${identityKind.value}:$inventoryId';
 }
 
 class StockLine {

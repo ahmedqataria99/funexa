@@ -164,13 +164,22 @@ void main() {
         updatedAt: now,
       ),
     );
+    await dataSource.saveCategory(
+      Category(
+        id: 'product-category',
+        name: 'تصنيف منتج نشط',
+        code: 'PRODUCT-CATEGORY',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
     await dataSource.saveProduct(
       Product(
         id: 'scroll-product',
         name: 'منتج اختبار التمرير',
         code: 'SCROLL-PRODUCT',
-        categoryId: 'scroll-category',
-        unitId: 'scroll-unit',
+        categoryId: 'product-category',
+        unitId: 'unit-1',
         createdAt: now,
         updatedAt: now,
       ),
@@ -256,6 +265,370 @@ void main() {
       throwsException,
     );
   });
+
+  test(
+    'base-unit changes are blocked by nonterminal production orders only',
+    () async {
+      final now = DateTime.now();
+      await dataSource.saveCategory(
+        Category(
+          id: 'unit-guard-category',
+          name: 'Unit Guard',
+          code: 'UNIT-GUARD',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      for (final unit in [
+        UnitEntity(
+          id: 'unit-guard-base',
+          name: 'Base Unit',
+          abbreviation: 'BU',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        UnitEntity(
+          id: 'unit-guard-alternate',
+          name: 'Alternate Unit',
+          abbreviation: 'AU',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ]) {
+        await dataSource.saveUnit(unit);
+      }
+
+      final db = await FurnexaDatabase.instance.database;
+      for (final status in ['DRAFT', 'PLANNED', 'IN_PROGRESS']) {
+        final productId = 'unit-guard-$status';
+        final routeId = 'unit-guard-route-$status';
+        await dataSource.saveProduct(
+          Product(
+            id: productId,
+            name: 'Unit Guard Product $status',
+            code: 'UNIT-GUARD-$status',
+            categoryId: 'unit-guard-category',
+            unitId: 'unit-guard-base',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        await db.insert('production_routes', {
+          'id': routeId,
+          'productId': productId,
+          'createdAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        });
+        await db.insert('production_orders', {
+          'id': 'unit-guard-order-$status',
+          'orderNumber': 'UNIT-GUARD-ORDER-$status',
+          'productId': productId,
+          'routeId': routeId,
+          'plannedQuantity': 2,
+          'producedQuantity': 0,
+          'status': status,
+          'createdAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        });
+
+        await expectLater(
+          dataSource.saveProduct(
+            Product(
+              id: productId,
+              name: 'Changed Name $status',
+              code: 'UNIT-GUARD-$status',
+              categoryId: 'unit-guard-category',
+              unitId: 'unit-guard-alternate',
+              createdAt: now,
+              updatedAt: now,
+            ),
+          ),
+          throwsA(
+            isA<Exception>().having(
+              (error) => error.toString(),
+              'message',
+              contains('أوامر إنتاج مفتوحة'),
+            ),
+          ),
+        );
+
+        final unchanged = (await db.query(
+          'products',
+          where: 'id = ?',
+          whereArgs: [productId],
+        )).single;
+        expect(unchanged['unitId'], 'unit-guard-base');
+        expect(unchanged['name'], 'Unit Guard Product $status');
+        expect(
+          (await db.query(
+            'production_orders',
+            where: 'id = ?',
+            whereArgs: ['unit-guard-order-$status'],
+          )).single['status'],
+          status,
+        );
+
+        await dataSource.saveProduct(
+          Product(
+            id: productId,
+            name: 'Updated Metadata $status',
+            code: 'UNIT-GUARD-$status',
+            categoryId: 'unit-guard-category',
+            unitId: 'unit-guard-base',
+            createdAt: now,
+            updatedAt: now.add(const Duration(minutes: 1)),
+          ),
+        );
+        expect(
+          (await db.query(
+            'products',
+            columns: ['name', 'unitId'],
+            where: 'id = ?',
+            whereArgs: [productId],
+          )).single,
+          {'name': 'Updated Metadata $status', 'unitId': 'unit-guard-base'},
+        );
+      }
+
+      for (final status in ['COMPLETED', 'CANCELLED']) {
+        final productId = 'unit-guard-terminal-$status';
+        final routeId = 'unit-guard-terminal-route-$status';
+        await dataSource.saveProduct(
+          Product(
+            id: productId,
+            name: 'Terminal Product $status',
+            code: 'UNIT-GUARD-TERMINAL-$status',
+            categoryId: 'unit-guard-category',
+            unitId: 'unit-guard-base',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        await db.insert('production_routes', {
+          'id': routeId,
+          'productId': productId,
+          'createdAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        });
+        await db.insert('production_orders', {
+          'id': 'unit-guard-terminal-order-$status',
+          'orderNumber': 'UNIT-GUARD-TERMINAL-ORDER-$status',
+          'productId': productId,
+          'routeId': routeId,
+          'plannedQuantity': 2,
+          'producedQuantity': status == 'COMPLETED' ? 2 : 0,
+          'status': status,
+          'createdAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        });
+
+        await dataSource.saveProduct(
+          Product(
+            id: productId,
+            name: 'Terminal Product $status',
+            code: 'UNIT-GUARD-TERMINAL-$status',
+            categoryId: 'unit-guard-category',
+            unitId: 'unit-guard-alternate',
+            createdAt: now,
+            updatedAt: now.add(const Duration(minutes: 1)),
+          ),
+        );
+        expect(
+          (await db.query(
+            'products',
+            columns: ['unitId'],
+            where: 'id = ?',
+            whereArgs: [productId],
+          )).single['unitId'],
+          'unit-guard-alternate',
+        );
+      }
+
+      final conversionProductId = 'unit-guard-conversion-product';
+      await dataSource.saveProduct(
+        Product(
+          id: conversionProductId,
+          name: 'Conversion Product',
+          code: 'UNIT-GUARD-CONVERSION',
+          categoryId: 'unit-guard-category',
+          unitId: 'unit-guard-base',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await db.insert('production_routes', {
+        'id': 'unit-guard-conversion-route',
+        'productId': conversionProductId,
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      await db.insert('production_orders', {
+        'id': 'unit-guard-conversion-order',
+        'orderNumber': 'UNIT-GUARD-CONVERSION-ORDER',
+        'productId': conversionProductId,
+        'routeId': 'unit-guard-conversion-route',
+        'plannedQuantity': 2,
+        'producedQuantity': 0,
+        'status': 'DRAFT',
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      final conversion = ProductUnitConversion(
+        id: 'unit-guard-conversion',
+        productId: conversionProductId,
+        unitId: 'unit-guard-alternate',
+        factorToBase: 12,
+        createdAt: now,
+        updatedAt: now,
+      );
+      await dataSource.saveUnitConversion(conversion);
+      await dataSource.saveUnitConversion(
+        ProductUnitConversion(
+          id: conversion.id,
+          productId: conversion.productId,
+          unitId: conversion.unitId,
+          factorToBase: 24,
+          createdAt: now,
+          updatedAt: now.add(const Duration(minutes: 1)),
+        ),
+      );
+      expect(
+        (await db.query(
+          'product_unit_conversions',
+          where: 'id = ?',
+          whereArgs: [conversion.id],
+        )).single['factorToBase'],
+        24,
+      );
+    },
+  );
+
+  test(
+    'base-unit changes remain blocked by stock activity and valuation',
+    () async {
+      final now = DateTime.now();
+      await dataSource.saveCategory(
+        Category(
+          id: 'unit-activity-category',
+          name: 'Unit Activity',
+          code: 'UNIT-ACTIVITY',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await dataSource.saveUnit(
+        UnitEntity(
+          id: 'unit-activity-base',
+          name: 'Base Unit',
+          abbreviation: 'BA',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await dataSource.saveUnit(
+        UnitEntity(
+          id: 'unit-activity-new',
+          name: 'New Unit',
+          abbreviation: 'NU',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      final db = await FurnexaDatabase.instance.database;
+      await db.insert('factories', {
+        'id': 'unit-activity-factory',
+        'name': 'Unit Activity Factory',
+        'code': 'UNIT-ACTIVITY-FACTORY',
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      await db.insert('warehouses', {
+        'id': 'unit-activity-warehouse',
+        'factoryId': 'unit-activity-factory',
+        'name': 'Unit Activity Warehouse',
+        'code': 'UNIT-ACTIVITY-WH',
+        'state': 'active',
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+
+      Future<void> createProduct(String id) => dataSource.saveProduct(
+        Product(
+          id: id,
+          name: id,
+          code: id,
+          categoryId: 'unit-activity-category',
+          unitId: 'unit-activity-base',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+
+      Future<void> changeUnit(String id) => dataSource.saveProduct(
+        Product(
+          id: id,
+          name: id,
+          code: id,
+          categoryId: 'unit-activity-category',
+          unitId: 'unit-activity-new',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+
+      await createProduct('unit-transaction-product');
+      await db.insert('stock_transactions', {
+        'id': 'unit-transaction-record',
+        'warehouseId': 'unit-activity-warehouse',
+        'itemId': 'unit-transaction-product',
+        'itemType': 'PRODUCT',
+        'productId': 'unit-transaction-product',
+        'inventoryIdentityKind': 'BASE',
+        'transactionType': 'STOCK_IN',
+        'quantity': 1,
+        'unitId': 'unit-activity-base',
+        'transactionDate': now.millisecondsSinceEpoch,
+        'createdAt': now.millisecondsSinceEpoch,
+      });
+      await expectLater(
+        changeUnit('unit-transaction-product'),
+        throwsException,
+      );
+      expect(
+        (await db.query(
+          'products',
+          columns: ['unitId'],
+          where: 'id = ?',
+          whereArgs: ['unit-transaction-product'],
+        )).single['unitId'],
+        'unit-activity-base',
+      );
+
+      await createProduct('unit-valuation-product');
+      await db.insert('inventory_valuations', {
+        'id': 'unit-valuation-record',
+        'warehouseId': 'unit-activity-warehouse',
+        'itemId': 'unit-valuation-product',
+        'itemType': 'PRODUCT',
+        'productId': 'unit-valuation-product',
+        'inventoryIdentityKind': 'BASE',
+        'unitId': 'unit-activity-base',
+        'quantity': 2,
+        'averageCost': 8,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      await expectLater(changeUnit('unit-valuation-product'), throwsException);
+      expect(
+        (await db.query(
+          'products',
+          columns: ['unitId'],
+          where: 'id = ?',
+          whereArgs: ['unit-valuation-product'],
+        )).single['unitId'],
+        'unit-activity-base',
+      );
+    },
+  );
 
   test(
     'variants, dimensions, and BOM maintain relationships and validate quantity',

@@ -324,14 +324,24 @@ class DashboardReportsLocalDataSource {
       return _empty(['Warehouse', 'Item', 'Quantity', 'Value']);
     final args = <Object?>[];
     final scope = _scopeFilter('sb.warehouseId', ScopeType.warehouse, args);
-    final searchSql = _search(['w.name', 'rm.name', 'p.name'], search, args);
+    final searchSql = _search(
+      ['w.name', 'rm.name', 'p.name', 'pv.name', 'pv.code'],
+      search,
+      args,
+    );
     final rows = await _query('''
-      SELECT w.name warehouse, COALESCE(rm.name, p.name, sb.itemId) item, sb.itemType itemType, sb.quantity quantity,
-        u.abbreviation unit, COALESCE(iv.averageCost, 0) averageCost, sb.quantity * COALESCE(iv.averageCost, 0) inventoryValue
+      SELECT w.name warehouse,
+        COALESCE(rm.name, p.name || CASE
+          WHEN sb.inventoryIdentityKind = 'LEGACY_UNASSIGNED' THEN ' • مخزون قديم غير مخصص'
+          WHEN pv.name IS NOT NULL THEN ' • ' || pv.name ELSE '' END, sb.itemId) item,
+        sb.itemType itemType, sb.quantity quantity,
+        u.abbreviation unit, COALESCE(iv.averageCost, 0) averageCost,
+        sb.quantity * COALESCE(iv.averageCost, 0) inventoryValue
       FROM stock_balances sb JOIN warehouses w ON w.id = sb.warehouseId
       LEFT JOIN raw_materials rm ON rm.id = sb.itemId AND sb.itemType = 'RAW_MATERIAL'
-      LEFT JOIN products p ON p.id = sb.itemId AND sb.itemType = 'PRODUCT'
-      LEFT JOIN units u ON u.id = COALESCE(rm.unitId, p.unitId)
+      LEFT JOIN products p ON p.id = COALESCE(sb.productId, sb.itemId) AND sb.itemType = 'PRODUCT'
+      LEFT JOIN product_variants pv ON pv.id = sb.variantId AND pv.productId = p.id
+      LEFT JOIN units u ON u.id = COALESCE(sb.unitId, rm.unitId, p.unitId)
       LEFT JOIN inventory_valuations iv ON iv.warehouseId = sb.warehouseId AND iv.itemId = sb.itemId AND iv.itemType = sb.itemType
       WHERE $scope $searchSql ORDER BY w.name, item
     ''', args);
@@ -355,15 +365,20 @@ class DashboardReportsLocalDataSource {
     final args = <Object?>[_date(range.startDay), _date(range.endExclusive)];
     final scope = _scopeFilter('st.warehouseId', ScopeType.warehouse, args);
     final searchSql = _search(
-      ['w.name', 'rm.name', 'p.name', 'st.reference'],
+      ['w.name', 'rm.name', 'p.name', 'pv.name', 'pv.code', 'st.reference'],
       search,
       args,
     );
     final rows = await _query('''
-      SELECT st.transactionDate date, st.transactionType type, w.name warehouse, COALESCE(rm.name, p.name, st.itemId) item, st.quantity quantity, st.reference reference
+      SELECT st.transactionDate date, st.transactionType type, w.name warehouse,
+        COALESCE(rm.name, p.name || CASE
+          WHEN st.inventoryIdentityKind = 'LEGACY_UNASSIGNED' THEN ' • مخزون قديم غير مخصص'
+          WHEN pv.name IS NOT NULL THEN ' • ' || pv.name ELSE '' END, st.itemId) item,
+        st.quantity quantity, st.reference reference
       FROM stock_transactions st JOIN warehouses w ON w.id = st.warehouseId
       LEFT JOIN raw_materials rm ON rm.id = st.itemId AND st.itemType = 'RAW_MATERIAL'
-      LEFT JOIN products p ON p.id = st.itemId AND st.itemType = 'PRODUCT'
+      LEFT JOIN products p ON p.id = COALESCE(st.productId, st.itemId) AND st.itemType = 'PRODUCT'
+      LEFT JOIN product_variants pv ON pv.id = st.variantId AND pv.productId = p.id
       WHERE st.transactionDate >= ? AND st.transactionDate < ? AND $scope $searchSql ORDER BY st.transactionDate DESC
     ''', args);
     return _result([

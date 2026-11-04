@@ -1,3 +1,5 @@
+import 'package:furnexa/core/inventory/inventory_identity.dart';
+
 enum AccountType { asset, liability, equity, revenue, expense }
 
 enum JournalEntryStatus { draft, posted, reversed }
@@ -44,6 +46,46 @@ class JournalLineInput {
   final double debit;
   final double credit;
   final String? description;
+}
+
+class PurchaseCommitmentLine {
+  const PurchaseCommitmentLine({
+    required this.itemId,
+    required this.itemType,
+    required this.orderedQuantity,
+    required this.receivedQuantity,
+    required this.unitPrice,
+  });
+
+  final String itemId;
+  final String itemType;
+  final double orderedQuantity;
+  final double receivedQuantity;
+  final double unitPrice;
+
+  double get remainingQuantity => orderedQuantity - receivedQuantity;
+  double get remainingValue => remainingQuantity * unitPrice;
+}
+
+class PurchaseCommitment {
+  const PurchaseCommitment({
+    required this.purchaseOrderId,
+    required this.orderNumber,
+    required this.supplierId,
+    required this.supplierName,
+    required this.purchaseRequestId,
+    required this.lines,
+  });
+
+  final String purchaseOrderId;
+  final String orderNumber;
+  final String supplierId;
+  final String supplierName;
+  final String? purchaseRequestId;
+  final List<PurchaseCommitmentLine> lines;
+
+  double get outstandingValue =>
+      lines.fold(0, (sum, line) => sum + line.remainingValue);
 }
 
 class JournalEntry {
@@ -207,6 +249,10 @@ class InventoryValuation {
     required this.itemType,
     required this.quantity,
     required this.averageCost,
+    this.productId,
+    this.variantId,
+    this.identityKind = InventoryIdentityKind.base,
+    this.unitId,
   });
 
   final String warehouseId;
@@ -214,6 +260,8 @@ class InventoryValuation {
   final String itemType;
   final double quantity;
   final double averageCost;
+  final String? productId, variantId, unitId;
+  final InventoryIdentityKind identityKind;
 
   double get totalValue => quantity * averageCost;
 }
@@ -226,6 +274,10 @@ class ProductionCostResult {
     required this.itemType,
     required this.quantity,
     required this.totalCost,
+    this.productId,
+    this.variantId,
+    this.identityKind = InventoryIdentityKind.base,
+    this.unitId,
   });
 
   final String referenceId;
@@ -234,4 +286,6 @@ class ProductionCostResult {
   final String itemType;
   final double quantity;
   final double totalCost;
+  final String? productId, variantId, unitId;
+  final InventoryIdentityKind identityKind;
 }

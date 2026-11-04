@@ -1,14 +1,20 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
 import 'package:furnexa/core/theme/app_theme.dart';
+import 'package:furnexa/features/accounting/data/repositories/accounting_repository_impl.dart';
+import 'package:furnexa/features/accounting/domain/entities/accounting_entities.dart';
+import 'package:furnexa/features/accounting/domain/repositories/accounting_repository.dart';
+import 'package:furnexa/features/accounting/presentation/pages/accounting_page.dart';
+import 'package:furnexa/features/factory_structure/data/repositories/factory_structure_repository_impl.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/purchasing/data/repositories/purchasing_repository_impl.dart';
 import 'package:furnexa/features/purchasing/domain/entities/purchasing_entities.dart';
 import 'package:furnexa/features/purchasing/domain/repositories/purchasing_repository.dart';
 import 'package:furnexa/features/purchasing/presentation/pages/supplier_profile_page.dart';
+import 'package:furnexa/features/purchasing/presentation/pages/purchase_document_pages.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
+import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 
 class PurchasingPage extends StatefulWidget {
   const PurchasingPage({super.key});
@@ -19,12 +25,18 @@ class PurchasingPage extends StatefulWidget {
 class _PurchasingPageState extends State<PurchasingPage>
     with SingleTickerProviderStateMixin {
   final PurchasingRepository _repository = PurchasingRepositoryImpl();
+  final AccountingRepository _accountingRepository = AccountingRepositoryImpl();
+  final SecurityLocalDataSource _security = SecurityLocalDataSource();
+  final FactoryStructureRepositoryImpl _factoryRepository =
+      FactoryStructureRepositoryImpl();
   late final TabController _tabs;
   List<Supplier> _suppliers = [];
+  Map<String, Supplier> _orderSuppliers = const {};
   List<PurchaseRequest> _requests = [];
   List<PurchaseOrder> _orders = [];
   List<StockItemOption> _items = [];
   List<Warehouse> _warehouses = [];
+  Map<String, String> _unitNames = const {};
   String _supplierQuery = '';
   final ScrollController _supplierScrollController = ScrollController();
   final ScrollController _requestScrollController = ScrollController();
@@ -96,8 +108,17 @@ class _PurchasingPageState extends State<PurchasingPage>
         _repository.orders(),
         _repository.activeItems(),
         _repository.activeWarehouses(),
+        _repository.unitNames(),
       ]);
       final repositoryRequests = result[1] as List<PurchaseRequest>;
+      final orders = result[2] as List<PurchaseOrder>;
+      final orderSuppliers = <String, Supplier>{};
+      await Future.wait(
+        orders.map((order) => order.supplierId).toSet().map((supplierId) async {
+          final supplier = await _repository.supplierById(supplierId);
+          if (supplier != null) orderSuppliers[supplierId] = supplier;
+        }),
+      );
       unawaited(
         FurnexaDatabaseDiagnostics.recordUiPipeline(
           feature: 'purchaseRequest',
@@ -113,10 +134,12 @@ class _PurchasingPageState extends State<PurchasingPage>
       if (!mounted) return;
       setState(() {
         _suppliers = result[0] as List<Supplier>;
+        _orderSuppliers = orderSuppliers;
         _requests = repositoryRequests;
-        _orders = result[2] as List<PurchaseOrder>;
+        _orders = orders;
         _items = result[3] as List<StockItemOption>;
         _warehouses = result[4] as List<Warehouse>;
+        _unitNames = result[5] as Map<String, String>;
       });
       unawaited(
         FurnexaDatabaseDiagnostics.recordUiPipeline(
@@ -294,49 +317,51 @@ class _PurchasingPageState extends State<PurchasingPage>
 
   Widget _requestsView() {
     final requests = List<PurchaseRequest>.of(_requests);
-    final requestWidgets = requests
-        .map(
-          (request) => ListTile(
-            title: Text('${request.requestNumber} • ${request.requestedBy}'),
-            subtitle: Text(
-              '${_requestArabic(request.status)} | ${request.items.length} أصناف',
-            ),
-            trailing: Wrap(
-              children: [
-                if (request.status == PurchaseRequestStatus.draft)
-                  IconButton(
-                    tooltip: 'إرسال',
-                    onPressed: () => _save(
-                      () => _repository.changeRequestStatus(
-                        request.id,
-                        PurchaseRequestStatus.pending,
-                      ),
-                    ),
-                    icon: const Icon(Icons.send_outlined),
+    final requestWidgets = requests.map((request) {
+      final linkedOrder = _orders
+          .where((order) => order.purchaseRequestId == request.id)
+          .firstOrNull;
+      return ListTile(
+        onTap: () => _requestDetails(request),
+        title: Text(request.requestNumber),
+        subtitle: Text(
+          '${_requestArabic(request.status)} | ${request.items.length} أصناف | ${_date(request.requestDate)}',
+        ),
+        trailing: Wrap(
+          children: [
+            if (request.status == PurchaseRequestStatus.draft)
+              IconButton(
+                tooltip: 'إرسال',
+                onPressed: () => _save(
+                  () => _repository.changeRequestStatus(
+                    request.id,
+                    PurchaseRequestStatus.pending,
                   ),
-                if (request.status == PurchaseRequestStatus.pending)
-                  IconButton(
-                    tooltip: 'اعتماد',
-                    onPressed: () => _save(
-                      () => _repository.changeRequestStatus(
-                        request.id,
-                        PurchaseRequestStatus.approved,
-                      ),
-                    ),
-                    icon: const Icon(Icons.check_circle_outline),
-                  ),
-                if (request.status == PurchaseRequestStatus.approved &&
-                    _suppliers.any((value) => value.active))
-                  IconButton(
-                    tooltip: 'تحويل إلى أمر شراء',
-                    onPressed: () => _convertRequest(request),
-                    icon: const Icon(Icons.transform_outlined),
-                  ),
-              ],
-            ),
-          ),
-        )
-        .toList();
+                ),
+                icon: const Icon(Icons.send_outlined),
+              ),
+            if (request.status == PurchaseRequestStatus.pending ||
+                (request.status == PurchaseRequestStatus.approved &&
+                    linkedOrder == null))
+              FilledButton.tonalIcon(
+                onPressed: () => _approveRequest(request),
+                icon: const Icon(Icons.task_alt_outlined),
+                label: Text(
+                  request.status == PurchaseRequestStatus.pending
+                      ? 'اعتماد وتحويل إلى أمر شراء'
+                      : 'إنشاء أمر الشراء',
+                ),
+              ),
+            if (linkedOrder != null)
+              IconButton(
+                tooltip: 'فتح أمر الشراء ${linkedOrder.orderNumber}',
+                onPressed: () => _orderDetails(linkedOrder),
+                icon: const Icon(Icons.open_in_new),
+              ),
+          ],
+        ),
+      );
+    }).toList();
     unawaited(
       FurnexaDatabaseDiagnostics.recordUiPipeline(
         feature: 'purchaseRequest',
@@ -369,10 +394,9 @@ class _PurchasingPageState extends State<PurchasingPage>
     onAdd: () => _orderForm(),
     scrollController: _orderScrollController,
     children: _orders.map((order) {
-      final supplier = _suppliers
-          .where((value) => value.id == order.supplierId)
-          .firstOrNull;
+      final supplier = _orderSuppliers[order.supplierId];
       return ListTile(
+        onTap: () => _orderDetails(order),
         title: Text('${order.orderNumber} • ${supplier?.name ?? '-'}'),
         subtitle: Text(
           '${_orderArabic(order.status)} | الإجمالي ${order.grandTotal.toStringAsFixed(2)}',
@@ -381,16 +405,16 @@ class _PurchasingPageState extends State<PurchasingPage>
           children: [
             if (order.status == PurchaseOrderStatus.draft)
               IconButton(
-                tooltip: 'تأكيد',
+                tooltip: 'اعتماد',
                 onPressed: () => _save(
                   () => _repository.changeOrderStatus(
                     order.id,
-                    PurchaseOrderStatus.confirmed,
+                    PurchaseOrderStatus.approved,
                   ),
                 ),
                 icon: const Icon(Icons.check_circle_outline),
               ),
-            if (order.status == PurchaseOrderStatus.confirmed ||
+            if (order.status == PurchaseOrderStatus.approved ||
                 order.status == PurchaseOrderStatus.partiallyReceived)
               IconButton(
                 tooltip: 'استلام',
@@ -405,7 +429,7 @@ class _PurchasingPageState extends State<PurchasingPage>
 
   String _orderArabic(PurchaseOrderStatus status) => switch (status) {
     PurchaseOrderStatus.draft => 'مسودة',
-    PurchaseOrderStatus.confirmed => 'مؤكد',
+    PurchaseOrderStatus.approved => 'معتمد',
     PurchaseOrderStatus.partiallyReceived => 'مستلم جزئياً',
     PurchaseOrderStatus.fullyReceived => 'مستلم بالكامل',
     PurchaseOrderStatus.cancelled => 'ملغى',
@@ -519,157 +543,199 @@ class _PurchasingPageState extends State<PurchasingPage>
     await _load();
   }
 
-  Future<void> _convertRequest(PurchaseRequest request) async {
-    final supplier = _suppliers.where((value) => value.active).firstOrNull;
-    if (supplier == null) return;
-    final now = DateTime.now();
-    final order = PurchaseOrder(
-      id: _id('order'),
-      orderNumber: _number('PO'),
-      supplierId: supplier.id,
-      purchaseRequestId: request.id,
-      orderDate: now,
-      status: PurchaseOrderStatus.draft,
-      subtotal: 0,
-      discount: 0,
-      tax: 0,
-      grandTotal: 0,
-      createdAt: now,
-      updatedAt: now,
-      items: request.items
-          .map(
-            (item) => PurchasingItem(
-              id: _id('order-item'),
-              itemId: item.itemId,
-              itemType: item.itemType,
-              quantity: item.quantity,
-              unitId: item.unitId,
-              unitPrice: 0,
-              lineTotal: 0,
-              notes: item.notes,
-            ),
-          )
-          .toList(),
-    );
-    await _save(() => _repository.convertRequestToOrder(request, order));
+  Future<void> _approveRequest(PurchaseRequest request) async {
+    try {
+      final order = await _repository.approveRequest(request.id);
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('تم اعتماد طلب الشراء وإنشاء أمر الشراء'),
+          action: SnackBarAction(
+            label: 'فتح أمر الشراء',
+            onPressed: () => _orderDetails(order),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        _message(error.toString().replaceFirst('Exception: ', ''), error: true);
+      }
+    }
   }
 
   Future<void> _requestForm() async {
-    if (_items.isEmpty) {
-      _message('أضف صنفاً نشطاً أولاً', error: true);
+    if (!_items.any((item) => item.type == StockItemType.rawMaterial)) {
+      _message('أضف خامة نشطة أولاً', error: true);
       return;
     }
-    final values = await _form(
-      'طلب شراء جديد',
-      [
-        _FormFieldData('requestedBy', 'مقدم الطلب'),
-        _FormFieldData('quantity', 'الكمية'),
-      ],
-      selects: [
-        _SelectData('itemId', 'الصنف', {
-          for (final item in _items)
-            '${item.type.value}:${item.id}':
-                '${item.name} (${item.type.arabic})',
-        }),
-      ],
+    final activeSuppliers = _suppliers.where((value) => value.active).toList();
+    if (activeSuppliers.isEmpty) {
+      _message('أضف مورداً نشطاً أولاً', error: true);
+      return;
+    }
+    final request = await Navigator.of(context).push<PurchaseRequest>(
+      MaterialPageRoute(
+        builder: (_) => PurchaseRequestDocumentPage(
+          suppliers: activeSuppliers,
+          items: _items,
+          unitNames: _unitNames,
+          createId: _id,
+          createNumber: _number,
+        ),
+      ),
     );
-    if (values == null) return;
-    final item = _items.firstWhere(
-      (value) => '${value.type.value}:${value.id}' == values['itemId'],
+    if (request == null) return;
+    await _save(() => _repository.saveRequest(request));
+  }
+
+  Future<void> _orderForm({PurchaseOrder? existingOrder}) async {
+    final activeSuppliers = _suppliers.where((value) => value.active).toList();
+    if (activeSuppliers.isEmpty ||
+        !_items.any((item) => item.type == StockItemType.rawMaterial)) {
+      _message('أضف مورداً وخامة نشطة أولاً', error: true);
+      return;
+    }
+    if (existingOrder != null &&
+        activeSuppliers.every(
+          (value) => value.id != existingOrder.supplierId,
+        )) {
+      final currentSupplier = _suppliers
+          .where((value) => value.id == existingOrder.supplierId)
+          .firstOrNull;
+      if (currentSupplier != null) activeSuppliers.add(currentSupplier);
+    }
+    final order = await Navigator.of(context).push<PurchaseOrder>(
+      MaterialPageRoute(
+        builder: (_) => PurchaseOrderDocumentPage(
+          suppliers: activeSuppliers,
+          items: _items,
+          unitNames: _unitNames,
+          createId: _id,
+          createNumber: _number,
+          initialOrder: existingOrder,
+        ),
+      ),
     );
-    final now = DateTime.now();
-    await _save(
-      () => _repository.saveRequest(
-        PurchaseRequest(
-          id: _id('request'),
-          requestNumber: _number('PR'),
-          requestDate: now,
-          requestedBy: values['requestedBy']!,
-          status: PurchaseRequestStatus.draft,
-          createdAt: now,
-          updatedAt: now,
-          items: [
-            PurchasingItem(
-              id: _id('request-item'),
-              itemId: item.id,
-              itemType: item.type == StockItemType.product
-                  ? PurchasingItemType.product
-                  : PurchasingItemType.rawMaterial,
-              quantity: double.parse(values['quantity']!),
-              unitId: item.unitId,
-            ),
-          ],
+    if (order == null) return;
+    await _save(() => _repository.saveOrder(order));
+  }
+
+  String _date(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+  Future<void> _requestDetails(PurchaseRequest request) async {
+    final supplier = _suppliers
+        .where((value) => value.id == request.supplierId)
+        .firstOrNull;
+    final generatedOrder = _orders
+        .where((order) => order.purchaseRequestId == request.id)
+        .firstOrNull;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PurchaseDocumentDetailsPage(
+          request: request,
+          generatedOrder: generatedOrder,
+          supplier: supplier,
+          items: _items,
+          unitNames: _unitNames,
+          onPrint: () => _printRequest(request, supplier),
+          onOpenOrder: generatedOrder == null
+              ? null
+              : () => _orderDetails(generatedOrder),
         ),
       ),
     );
   }
 
-  Future<void> _orderForm() async {
-    if (_suppliers.where((value) => value.active).isEmpty || _items.isEmpty) {
-      _message('أضف مورداً وصنفاً نشطاً أولاً', error: true);
-      return;
+  Future<void> _orderDetails(PurchaseOrder order) async {
+    final supplier = await _repository.supplierById(order.supplierId);
+    final request = _requests
+        .where((value) => value.id == order.purchaseRequestId)
+        .firstOrNull;
+    final receipts = await _repository.receipts(order.id);
+    final receiptJournalEntries = <String, JournalEntry>{};
+    if (_security.can('ACCOUNTING_VIEW')) {
+      for (final receipt in receipts) {
+        final entry = await _accountingRepository.journalEntryByReference(
+          referenceType: 'PURCHASE_RECEIPT',
+          referenceId: receipt.id,
+        );
+        if (entry != null) receiptJournalEntries[receipt.id] = entry;
+      }
     }
-    final values = await _form(
-      'أمر شراء جديد',
-      [
-        _FormFieldData('quantity', 'الكمية'),
-        _FormFieldData('unitPrice', 'سعر الوحدة'),
-        _FormFieldData('discount', 'الخصم', '0', true),
-        _FormFieldData('tax', 'الضريبة', '0', true),
-      ],
-      selects: [
-        _SelectData('supplierId', 'المورد', {
-          for (final supplier in _suppliers.where((value) => value.active))
-            supplier.id: supplier.name,
-        }),
-        _SelectData('itemId', 'الصنف', {
-          for (final item in _items)
-            '${item.type.value}:${item.id}':
-                '${item.name} (${item.type.arabic})',
-        }),
-      ],
-    );
-    if (values == null) return;
-    final item = _items.firstWhere(
-      (value) => '${value.type.value}:${value.id}' == values['itemId'],
-    );
-    final quantity = double.parse(values['quantity']!);
-    final price = double.parse(values['unitPrice']!);
-    final discount = double.tryParse(values['discount'] ?? '0') ?? 0;
-    final tax = double.tryParse(values['tax'] ?? '0') ?? 0;
-    final now = DateTime.now();
-    final total = quantity * price - discount + tax;
-    await _save(
-      () => _repository.saveOrder(
-        PurchaseOrder(
-          id: _id('order'),
-          orderNumber: _number('PO'),
-          supplierId: values['supplierId']!,
-          orderDate: now,
-          status: PurchaseOrderStatus.draft,
-          subtotal: quantity * price,
-          discount: discount,
-          tax: tax,
-          grandTotal: total,
-          createdAt: now,
-          updatedAt: now,
-          items: [
-            PurchasingItem(
-              id: _id('order-item'),
-              itemId: item.id,
-              itemType: item.type == StockItemType.product
-                  ? PurchasingItemType.product
-                  : PurchasingItemType.rawMaterial,
-              quantity: quantity,
-              unitId: item.unitId,
-              unitPrice: price,
-              discount: discount,
-              tax: tax,
-              lineTotal: total,
-            ),
-          ],
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PurchaseDocumentDetailsPage(
+          order: order,
+          purchaseRequestNumber: request?.requestNumber,
+          receipts: receipts,
+          receiptJournalEntries: receiptJournalEntries,
+          supplier: supplier,
+          items: _items,
+          unitNames: _unitNames,
+          warehouses: _warehouses,
+          onPrint: () => _printOrder(order, supplier),
+          onOpenAccountingEntry: _security.can('ACCOUNTING_VIEW')
+              ? _openAccountingEntry
+              : null,
+          onEditOrder:
+              order.status == PurchaseOrderStatus.draft ||
+                  order.status == PurchaseOrderStatus.approved
+              ? () => _orderForm(existingOrder: order)
+              : null,
         ),
       ),
+    );
+    await _load();
+  }
+
+  Future<void> _openAccountingEntry(JournalEntry entry) async {
+    final accounts = await _accountingRepository.accounts();
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) =>
+            AccountingJournalEntryDetailsPage(entry: entry, accounts: accounts),
+      ),
+    );
+  }
+
+  Future<void> _printRequest(
+    PurchaseRequest request,
+    Supplier? supplier,
+  ) async {
+    final factory = await _factoryRepository.getFactory();
+    await printPurchaseDocument(
+      factoryName: factory?.name ?? '',
+      title: 'طلب شراء',
+      number: request.requestNumber,
+      date: request.requestDate,
+      supplier: supplier,
+      notes: request.notes,
+      items: request.items,
+      catalog: _items,
+      unitNames: _unitNames,
+    );
+  }
+
+  Future<void> _printOrder(PurchaseOrder order, Supplier? supplier) async {
+    final factory = await _factoryRepository.getFactory();
+    await printPurchaseDocument(
+      factoryName: factory?.name ?? '',
+      title: 'أمر شراء',
+      number: order.orderNumber,
+      date: order.orderDate,
+      supplier: supplier,
+      notes: order.notes,
+      items: order.items,
+      catalog: _items,
+      unitNames: _unitNames,
+      showFinancials: true,
+      subtotal: order.subtotal,
+      discount: order.discount,
+      tax: order.tax,
+      grandTotal: order.grandTotal,
     );
   }
 
@@ -693,19 +759,22 @@ class _PurchasingPageState extends State<PurchasingPage>
         }),
         _SelectData('itemId', 'صنف الأمر', {
           for (final item in pending)
-            item.id: '${item.itemId} | المتبقي ${item.remainingQuantity}',
+            item.id:
+                '${_receiptItemLabel(item)} | المتبقي ${item.remainingQuantity}',
         }),
       ],
     );
     if (values == null) return;
     final item = pending.firstWhere((value) => value.id == values['itemId']);
     final now = DateTime.now();
+    final operationId = _id('receipt-operation');
     await _save(
       () => _repository.postReceipt(
         order: order,
         warehouseId: values['warehouseId']!,
         receiptDate: now,
         notes: values['notes'],
+        operationId: operationId,
         items: [
           PurchasingItem(
             id: item.id,
@@ -717,6 +786,17 @@ class _PurchasingPageState extends State<PurchasingPage>
         ],
       ),
     );
+  }
+
+  String _receiptItemLabel(PurchasingItem line) {
+    final itemType = line.itemType == PurchasingItemType.product
+        ? StockItemType.product
+        : StockItemType.rawMaterial;
+    final material = _items
+        .where((item) => item.id == line.itemId && item.type == itemType)
+        .firstOrNull;
+    if (material == null) return 'غير معروف';
+    return '${material.name} • ${material.code}';
   }
 
   Future<Map<String, String>?> _form(

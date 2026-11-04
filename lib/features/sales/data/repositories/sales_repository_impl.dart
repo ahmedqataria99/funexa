@@ -62,17 +62,19 @@ class SalesRepositoryImpl implements SalesRepository {
     notes: notes,
   );
   @override
-  Future<void> postDelivery({
+  Future<SalesDelivery> postDelivery({
     required SalesOrder order,
     required String warehouseId,
     required DateTime deliveryDate,
     required List<SalesItem> items,
+    required String operationId,
     String? notes,
   }) => _dataSource.postDelivery(
     order: order,
     warehouseId: warehouseId,
     deliveryDate: deliveryDate,
     items: items,
+    operationId: operationId,
     notes: notes,
   );
   @override

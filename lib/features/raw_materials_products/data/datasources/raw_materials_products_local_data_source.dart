@@ -1,5 +1,7 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
+import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 import 'package:furnexa/features/raw_materials_products/domain/entities/item_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 
@@ -20,6 +22,17 @@ class RawMaterialsProductsLocalDataSource {
         'name',
         'abbreviation',
       ], UnitEntity.fromMap);
+  Future<List<ProductUnitConversion>> unitConversions(String productId) async {
+    _security.require('PRODUCTS_VIEW');
+    final rows = await (await _db).query(
+      'product_unit_conversions',
+      where: 'productId = ?',
+      whereArgs: [productId],
+      orderBy: 'active DESC, unitId ASC',
+    );
+    return rows.map(ProductUnitConversion.fromMap).toList();
+  }
+
   Future<List<ItemColor>> colors([String query = '']) async =>
       _catalogSearch<ItemColor>('colors', query, [
         'name',
@@ -492,15 +505,238 @@ class RawMaterialsProductsLocalDataSource {
   Future<void> saveProduct(Product value) async {
     await _requireActive('categories', value.categoryId, 'التصنيف');
     await _requireActive('units', value.unitId, 'الوحدة');
-    await _save('products', value.id, value.toMap());
+    final db = await _db;
+    _security.require('PRODUCTS_EDIT');
+    final created = await db.transaction((txn) async {
+      final existing = await txn.query(
+        'products',
+        columns: ['unitId'],
+        where: 'id = ?',
+        whereArgs: [value.id],
+        limit: 1,
+      );
+      if (existing.isNotEmpty && existing.single['unitId'] != value.unitId) {
+        final activity = await txn.rawQuery(
+          '''
+          SELECT 1 FROM stock_transactions
+          WHERE itemType = 'PRODUCT' AND (itemId = ? OR productId = ?)
+          UNION ALL
+          SELECT 1 FROM inventory_valuations
+          WHERE itemType = 'PRODUCT' AND (itemId = ? OR productId = ?)
+          LIMIT 1
+          ''',
+          [value.id, value.id, value.id, value.id],
+        );
+        if (activity.isNotEmpty) {
+          throw Exception('لا يمكن تغيير الوحدة الأساسية بعد حركة مخزون');
+        }
+        final openOrders = await txn.query(
+          'production_orders',
+          columns: ['id'],
+          where: 'productId = ? AND status IN (?, ?, ?)',
+          whereArgs: [value.id, 'DRAFT', 'PLANNED', 'IN_PROGRESS'],
+          limit: 1,
+        );
+        if (openOrders.isNotEmpty) {
+          throw Exception(
+            'لا يمكن تغيير الوحدة الأساسية للمنتج أثناء وجود أوامر إنتاج مفتوحة. أكمل أو ألغِ أوامر الإنتاج أولاً.',
+          );
+        }
+      }
+      final updated = await txn.update(
+        'products',
+        value.toMap(),
+        where: 'id = ?',
+        whereArgs: [value.id],
+      );
+      if (updated == 0) {
+        await txn.insert('products', value.toMap());
+        return true;
+      }
+      return false;
+    });
+    await _security.audit(
+      action: created ? 'CREATE' : 'UPDATE',
+      module: 'Products',
+      entityType: 'products',
+      entityId: value.id,
+      description: 'Master data changed',
+    );
+  }
+
+  Future<void> saveUnitConversion(ProductUnitConversion value) async {
+    _security.require('PRODUCTS_EDIT');
+    if (!value.factorToBase.isFinite || value.factorToBase <= 0) {
+      throw Exception('معامل تحويل الوحدة غير صالح');
+    }
+    final db = await _db;
+    final productRows = await db.query(
+      'products',
+      columns: ['unitId'],
+      where: 'id = ? AND active = 1',
+      whereArgs: [value.productId],
+      limit: 1,
+    );
+    if (productRows.isEmpty) throw Exception('المنتج غير موجود أو غير نشط');
+    if (productRows.single['unitId'] == value.unitId) {
+      throw Exception('الوحدة الأساسية معامل تحويلها ثابت ويساوي واحداً');
+    }
+    await _requireActive('units', value.unitId, 'الوحدة');
+    await db.transaction((txn) async {
+      final duplicate = await txn.query(
+        'product_unit_conversions',
+        columns: ['id'],
+        where: 'productId = ? AND unitId = ? AND id != ?',
+        whereArgs: [value.productId, value.unitId, value.id],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw Exception('معامل تحويل الوحدة مسجل بالفعل لهذا المنتج');
+      }
+      final updated = await txn.update(
+        'product_unit_conversions',
+        value.toMap(),
+        where: 'id = ?',
+        whereArgs: [value.id],
+      );
+      if (updated == 0)
+        await txn.insert('product_unit_conversions', value.toMap());
+    });
+  }
+
+  Future<void> setUnitConversionActive(String id, bool active) async {
+    _security.require('PRODUCTS_EDIT');
+    final changed = await (await _db).update(
+      'product_unit_conversions',
+      {
+        'active': active ? 1 : 0,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (changed == 0) throw Exception('معامل تحويل الوحدة غير موجود');
   }
 
   Future<void> saveVariant(ProductVariant value) async {
-    await _requireActive('products', value.productId, 'المنتج');
-    if (value.colorId != null) {
-      await _requireActive('colors', value.colorId!, 'اللون');
-    }
-    await _save('product_variants', value.id, value.toMap());
+    _security.require('PRODUCTS_EDIT');
+    final db = await _db;
+    final wasCreated = await db.transaction((txn) async {
+      if ((await txn.query(
+        'products',
+        columns: ['id'],
+        where: 'id = ? AND active = 1',
+        whereArgs: [value.productId],
+        limit: 1,
+      )).isEmpty) {
+        throw Exception('المنتج غير موجود أو غير نشط');
+      }
+      if (value.colorId != null &&
+          (await txn.query(
+            'colors',
+            columns: ['id'],
+            where: 'id = ? AND active = 1',
+            whereArgs: [value.colorId],
+            limit: 1,
+          )).isEmpty) {
+        throw Exception('اللون غير موجود أو غير نشط');
+      }
+      final existingVariant = await txn.query(
+        'product_variants',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [value.id],
+        limit: 1,
+      );
+      final variants = await txn.query(
+        'product_variants',
+        columns: ['id'],
+        where: 'productId = ?',
+        whereArgs: [value.productId],
+        limit: 1,
+      );
+      if (variants.isEmpty && existingVariant.isEmpty) {
+        final legacyId = inventoryItemKey(
+          productId: value.productId,
+          type: StockItemType.product,
+          identityKind: InventoryIdentityKind.legacyUnassigned,
+        );
+        for (final table in [
+          'stock_balances',
+          'stock_transactions',
+          'inventory_valuations',
+          'stock_minimum_levels',
+        ]) {
+          final collision = await txn.query(
+            table,
+            columns: ['id'],
+            where: 'itemType = ? AND itemId = ? AND productId != ?',
+            whereArgs: ['PRODUCT', legacyId, value.productId],
+            limit: 1,
+          );
+          if (collision.isNotEmpty) {
+            throw StateError('Legacy inventory identity key collision');
+          }
+        }
+        await txn.update(
+          'stock_balances',
+          {
+            'itemId': legacyId,
+            'inventoryIdentityKind': 'LEGACY_UNASSIGNED',
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+          where:
+              "itemType = 'PRODUCT' AND productId = ? AND inventoryIdentityKind = 'BASE'",
+          whereArgs: [value.productId],
+        );
+        await txn.update(
+          'stock_transactions',
+          {'itemId': legacyId, 'inventoryIdentityKind': 'LEGACY_UNASSIGNED'},
+          where:
+              "itemType = 'PRODUCT' AND productId = ? AND inventoryIdentityKind = 'BASE'",
+          whereArgs: [value.productId],
+        );
+        await txn.update(
+          'inventory_valuations',
+          {
+            'itemId': legacyId,
+            'inventoryIdentityKind': 'LEGACY_UNASSIGNED',
+            'unitId': null,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+          where:
+              "itemType = 'PRODUCT' AND productId = ? AND inventoryIdentityKind = 'BASE'",
+          whereArgs: [value.productId],
+        );
+        await txn.update(
+          'stock_minimum_levels',
+          {
+            'itemId': legacyId,
+            'inventoryIdentityKind': 'LEGACY_UNASSIGNED',
+            'unitId': null,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+          where:
+              "itemType = 'PRODUCT' AND productId = ? AND inventoryIdentityKind = 'BASE'",
+          whereArgs: [value.productId],
+        );
+      }
+      final updated = await txn.update(
+        'product_variants',
+        value.toMap(),
+        where: 'id = ?',
+        whereArgs: [value.id],
+      );
+      if (updated == 0) await txn.insert('product_variants', value.toMap());
+      return existingVariant.isEmpty;
+    });
+    await _security.audit(
+      action: wasCreated ? 'CREATE' : 'UPDATE',
+      module: 'Products',
+      entityType: 'ProductVariant',
+      entityId: value.id,
+      description: 'Product variant changed',
+    );
   }
 
   Future<void> saveDimensions(ProductDimension value) async {
@@ -565,9 +801,26 @@ class RawMaterialsProductsLocalDataSource {
       'colors',
       'raw_materials',
       'products',
+      'product_variants',
     };
     if (!allowed.contains(table)) throw Exception('الجدول غير مسموح');
     _security.require('PRODUCTS_EDIT');
+    if (table == 'product_variants' && !active) {
+      final variantActivity = await (await _db).rawQuery(
+        '''
+        SELECT 1 FROM stock_transactions
+        WHERE variantId = ?
+        UNION ALL
+        SELECT 1 FROM inventory_valuations
+        WHERE variantId = ? AND quantity > 0
+        LIMIT 1
+        ''',
+        [id, id],
+      );
+      if (variantActivity.isNotEmpty) {
+        throw Exception('لا يمكن تعطيل متغير له حركة أو رصيد مخزون');
+      }
+    }
     final updated = await (await _db).update(
       table,
       {

@@ -21,10 +21,19 @@ class ProductionRepositoryImpl implements ProductionRepository {
   @override
   Future<List<Warehouse>> activeWarehouses() => _dataSource.activeWarehouses();
   @override
+  Future<List<Warehouse>> accessibleProductionWarehouses() =>
+      _dataSource.accessibleProductionWarehouses();
+  @override
   Future<List<ProductionRoute>> routes() => _dataSource.routes();
   @override
   Future<ProductionRoute?> routeForProduct(String productId) =>
       _dataSource.routeForProduct(productId);
+  @override
+  Future<bool> productBomIsValid(String productId) =>
+      _dataSource.productBomIsValid(productId);
+  @override
+  Future<bool> orderBomIsValid(String orderId) =>
+      _dataSource.orderBomIsValid(orderId);
   @override
   Future<void> saveRoute(String productId, List<String> stageIds) =>
       _dataSource.saveRoute(productId, stageIds);
@@ -37,11 +46,13 @@ class ProductionRepositoryImpl implements ProductionRepository {
   Future<ProductionOrder> createOrder({
     required String productId,
     String? variantId,
+    String? expectedUnitId,
     required double plannedQuantity,
     String? notes,
   }) => _dataSource.createOrder(
     productId: productId,
     variantId: variantId,
+    expectedUnitId: expectedUnitId,
     plannedQuantity: plannedQuantity,
     notes: notes,
   );
@@ -77,6 +88,7 @@ class ProductionRepositoryImpl implements ProductionRepository {
     required String warehouseId,
     required double quantity,
     required DateTime date,
+    required String operationId,
     String? notes,
   }) => _dataSource.consumeMaterial(
     orderId: orderId,
@@ -84,6 +96,7 @@ class ProductionRepositoryImpl implements ProductionRepository {
     warehouseId: warehouseId,
     quantity: quantity,
     date: date,
+    operationId: operationId,
     notes: notes,
   );
   @override
@@ -110,14 +123,19 @@ class ProductionRepositoryImpl implements ProductionRepository {
     required String warehouseId,
     required double quantity,
     required DateTime date,
+    required String operationId,
     String? notes,
   }) => _dataSource.recordOutput(
     orderId: orderId,
     warehouseId: warehouseId,
     quantity: quantity,
     date: date,
+    operationId: operationId,
     notes: notes,
   );
+  @override
+  Future<List<Warehouse>> outputWarehouses(String orderId) =>
+      _dataSource.outputWarehouses(orderId);
   @override
   Future<List<StockItemOption>> activeRawMaterials() =>
       _dataSource.activeRawMaterials();

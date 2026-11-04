@@ -1,4 +1,5 @@
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
 import 'package:furnexa/features/warehouses_stock/data/datasources/warehouses_stock_local_data_source.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
@@ -17,6 +18,7 @@ class WarehousesStockRepositoryImpl implements WarehousesStockRepository {
     );
     return warehouses;
   }
+
   @override
   Future<List<StockItemOption>> activeItems() => _dataSource.activeItems();
   @override
@@ -39,18 +41,35 @@ class WarehousesStockRepositoryImpl implements WarehousesStockRepository {
     );
     return stock;
   }
+
   @override
   Future<List<StockLedgerLine>> ledger(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  ) => _dataSource.ledger(warehouseId, itemId, itemType);
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  }) => _dataSource.ledger(
+    warehouseId,
+    itemId,
+    itemType,
+    variantId: variantId,
+    identityKind: identityKind,
+  );
   @override
   Future<double> balance(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  ) => _dataSource.balance(warehouseId, itemId, itemType);
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  }) => _dataSource.balance(
+    warehouseId,
+    itemId,
+    itemType,
+    variantId: variantId,
+    identityKind: identityKind,
+  );
   @override
   Future<void> stockIn({
     required String warehouseId,

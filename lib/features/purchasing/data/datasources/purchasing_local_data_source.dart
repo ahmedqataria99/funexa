@@ -1,25 +1,34 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/purchasing/domain/entities/purchasing_entities.dart';
 import 'package:furnexa/features/warehouses_stock/data/datasources/warehouses_stock_local_data_source.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 import 'package:furnexa/features/accounting/data/datasources/accounting_local_data_source.dart';
-import 'package:furnexa/features/accounting/domain/entities/accounting_entities.dart';
+import 'package:furnexa/features/accounting/domain/purchasing_receiving_contract.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 import 'package:furnexa/features/users_roles_permissions/domain/entities/security_entities.dart';
 
 class PurchasingLocalDataSource {
   PurchasingLocalDataSource([
     WarehousesStockLocalDataSource? stock,
-    AccountingLocalDataSource? accounting,
-  ]) : _stock = stock ?? WarehousesStockLocalDataSource(),
+    PurchasingReceiptAccountingSink? accounting,
+  ]) : _database = null,
+       _stock = stock ?? WarehousesStockLocalDataSource(),
        _accounting = accounting ?? AccountingLocalDataSource();
+
+  PurchasingLocalDataSource.withDatabase(Database database)
+    : _database = database,
+      _stock = WarehousesStockLocalDataSource(),
+      _accounting = AccountingLocalDataSource();
+  final Database? _database;
   final WarehousesStockLocalDataSource _stock;
-  final AccountingLocalDataSource _accounting;
+  final PurchasingReceiptAccountingSink _accounting;
   final SecurityLocalDataSource _security = SecurityLocalDataSource();
-  Future<Database> get _db async => FurnexaDatabase.instance.database;
+  Future<Database> get _db async =>
+      _database ?? await FurnexaDatabase.instance.database;
 
   Future<List<Supplier>> suppliers([String query = '']) async {
     final db = await _db;
@@ -31,6 +40,16 @@ class PurchasingLocalDataSource {
       orderBy: 'name ASC',
     );
     return rows.map(Supplier.fromMap).toList();
+  }
+
+  Future<Supplier?> supplierById(String id) async {
+    final rows = await (await _db).query(
+      'suppliers',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : Supplier.fromMap(rows.first);
   }
 
   Future<void> saveSupplier(Supplier value) async {
@@ -114,6 +133,10 @@ class PurchasingLocalDataSource {
           throw Exception('انتقال حالة الطلب غير مسموح');
         }
       }
+      if (request.supplierId.trim().isEmpty) {
+        throw Exception('يجب اختيار المورد قبل حفظ الطلب');
+      }
+      await _validateSupplier(txn, request.supplierId);
       await _validateRequestItems(txn, request.items);
       await _saveExecutor(
         txn,
@@ -161,6 +184,10 @@ class PurchasingLocalDataSource {
     String id,
     PurchaseRequestStatus status,
   ) async {
+    if (status == PurchaseRequestStatus.approved) {
+      await approveRequest(id);
+      return;
+    }
     _security.require('PURCHASING_VIEW');
     final db = await _db;
     final row = await db.query(
@@ -191,6 +218,157 @@ class PurchasingLocalDataSource {
     );
   }
 
+  Future<PurchaseOrder> approveRequest(String requestId) async {
+    _security.require('PURCHASING_VIEW');
+    final db = await _db;
+    String? orderId;
+    var created = false;
+    await db.transaction((txn) async {
+      final requestRows = await txn.query(
+        'purchase_requests',
+        where: 'id = ?',
+        whereArgs: [requestId],
+        limit: 1,
+      );
+      if (requestRows.isEmpty) throw Exception('الطلب غير موجود');
+      final requestRow = requestRows.single;
+      final currentStatus = _requestStatus(requestRow['status'] as String);
+
+      final linkedOrders = await txn.query(
+        'purchase_orders',
+        columns: ['id'],
+        where: 'purchaseRequestId = ?',
+        whereArgs: [requestId],
+        limit: 1,
+      );
+      if (linkedOrders.isNotEmpty) {
+        orderId = linkedOrders.single['id'] as String;
+        if (currentStatus != PurchaseRequestStatus.converted) {
+          await txn.update(
+            'purchase_requests',
+            {
+              'status': 'CONVERTED',
+              'updatedAt': DateTime.now().millisecondsSinceEpoch,
+            },
+            where: 'id = ?',
+            whereArgs: [requestId],
+          );
+        }
+        return;
+      }
+
+      if (currentStatus != PurchaseRequestStatus.pending &&
+          currentStatus != PurchaseRequestStatus.approved) {
+        throw Exception('يجب إرسال الطلب قبل اعتماده');
+      }
+      final supplierId = requestRow['supplierId'] as String? ?? '';
+      if (supplierId.trim().isEmpty) {
+        throw Exception('يجب تحديد مورد صالح للطلب');
+      }
+      await _validateSupplier(txn, supplierId);
+
+      final requestItemRows = await txn.query(
+        'purchase_request_items',
+        where: 'purchaseRequestId = ?',
+        whereArgs: [requestId],
+        orderBy: 'rowid ASC',
+      );
+      final requestItems = requestItemRows
+          .map(
+            (row) => PurchasingItem(
+              id: row['id'] as String,
+              itemId: row['productId'] as String? ?? row['itemId'] as String,
+              itemType: row['itemType'] == 'PRODUCT'
+                  ? PurchasingItemType.product
+                  : PurchasingItemType.rawMaterial,
+              quantity: (row['quantity'] as num).toDouble(),
+              unitId: row['unitId'] as String,
+              variantId: row['variantId'] as String?,
+              baseUnitId: row['baseUnitId'] as String?,
+              unitConversionFactor:
+                  (row['unitConversionFactor'] as num?)?.toDouble() ?? 1,
+              baseQuantity: (row['baseQuantity'] as num?)?.toDouble(),
+              inventoryIdentityKind:
+                  row['inventoryIdentityKind'] as String? ?? 'BASE',
+              identitySnapshotStatus:
+                  row['identitySnapshotStatus'] as String? ?? 'UNVERIFIED',
+              notes: row['notes'] as String?,
+            ),
+          )
+          .toList();
+      await _validateOrderItems(txn, requestItems);
+
+      final now = DateTime.now();
+      orderId = 'order-$requestId';
+      final order = PurchaseOrder(
+        id: orderId!,
+        orderNumber: 'PO-${requestRow['requestNumber']}',
+        supplierId: supplierId,
+        purchaseRequestId: requestId,
+        orderDate: now,
+        status: PurchaseOrderStatus.draft,
+        subtotal: 0,
+        discount: 0,
+        tax: 0,
+        grandTotal: 0,
+        notes: requestRow['notes'] as String?,
+        createdAt: now,
+        updatedAt: now,
+        items: [
+          for (var index = 0; index < requestItems.length; index++)
+            PurchasingItem(
+              id: purchasingDocumentItemId(orderId!, index),
+              itemId: requestItems[index].itemId,
+              itemType: requestItems[index].itemType,
+              quantity: requestItems[index].quantity,
+              unitId: requestItems[index].unitId,
+              variantId: requestItems[index].variantId,
+              baseUnitId: requestItems[index].baseUnitId,
+              unitConversionFactor: requestItems[index].unitConversionFactor,
+              baseQuantity: requestItems[index].baseQuantity,
+              inventoryIdentityKind: requestItems[index].inventoryIdentityKind,
+              identitySnapshotStatus:
+                  requestItems[index].identitySnapshotStatus,
+              unitPrice: requestItems[index].unitPrice,
+              discount: requestItems[index].discount,
+              tax: requestItems[index].tax,
+              lineTotal: requestItems[index].lineTotal,
+              notes: requestItems[index].notes,
+            ),
+        ],
+      );
+      await _saveExecutor(txn, 'purchase_orders', order.id, _orderMap(order));
+      for (final item in order.items) {
+        await txn.insert('purchase_order_items', _orderItemMap(order.id, item));
+      }
+      await txn.update(
+        'purchase_requests',
+        {'status': 'CONVERTED', 'updatedAt': now.millisecondsSinceEpoch},
+        where: 'id = ?',
+        whereArgs: [requestId],
+      );
+      created = true;
+    });
+
+    if (orderId == null) throw StateError('تعذر إنشاء أمر الشراء');
+    if (created) {
+      await _auditSafely(
+        action: 'CONVERSION',
+        entityType: 'PurchaseOrder',
+        entityId: orderId!,
+        description: 'Purchase request approved and purchase order created',
+      );
+    }
+    final orderRows = await db.query(
+      'purchase_orders',
+      where: 'id = ?',
+      whereArgs: [orderId],
+      limit: 1,
+    );
+    if (orderRows.isEmpty) throw Exception('أمر الشراء المرتبط غير موجود');
+    return _orderFromRow(orderRows.single);
+  }
+
   Future<List<PurchaseOrder>> orders([String query = '']) async {
     final db = await _db;
     final rows = await db.query(
@@ -214,84 +392,59 @@ class PurchasingLocalDataSource {
       whereArgs: [order.id],
       limit: 1,
     );
+    final normalized = _recalculateOrderFinancials(order);
+    _validateOrderFinancialValues(normalized);
     await db.transaction((txn) async {
-      await _validateOrderEdit(txn, order);
-      await _validateSupplier(txn, order.supplierId);
-      await _validateOrderItems(txn, order.items);
-      await _saveExecutor(txn, 'purchase_orders', order.id, _orderMap(order));
+      await _validateOrderEdit(txn, normalized);
+      await _validateSupplier(txn, normalized.supplierId);
+      await _validateOrderItems(txn, normalized.items);
+      _validateOrderPriceRequirements(normalized.items, normalized.status);
+      await _saveExecutor(
+        txn,
+        'purchase_orders',
+        normalized.id,
+        _orderMap(normalized),
+      );
       await txn.delete(
         'purchase_order_items',
         where: 'purchaseOrderId = ?',
-        whereArgs: [order.id],
+        whereArgs: [normalized.id],
       );
-      for (final item in order.items) {
-        await txn.insert('purchase_order_items', _orderItemMap(order.id, item));
+      for (final item in normalized.items) {
+        await txn.insert(
+          'purchase_order_items',
+          _orderItemMap(normalized.id, item),
+        );
       }
     });
     await _auditSafely(
       action: existing.isEmpty ? 'CREATE' : 'UPDATE',
       entityType: 'PurchaseOrder',
-      entityId: order.id,
+      entityId: normalized.id,
       description: 'Purchase order saved',
     );
-    return order;
+    return normalized;
   }
 
   Future<PurchaseOrder> convertRequestToOrder(
     PurchaseRequest request,
     PurchaseOrder order,
   ) async {
-    _security.require('PURCHASING_VIEW');
-    final db = await _db;
-    await db.transaction((txn) async {
-      final requestRows = await txn.query(
-        'purchase_requests',
-        columns: ['status'],
-        where: 'id = ?',
-        whereArgs: [request.id],
-        limit: 1,
-      );
-      if (requestRows.isEmpty ||
-          _requestStatus(requestRows.first['status'] as String) !=
-              PurchaseRequestStatus.approved) {
-        throw Exception('يجب اعتماد الطلب قبل تحويله');
-      }
-      final existingOrders = await txn.query(
-        'purchase_orders',
-        columns: ['id'],
-        where: 'purchaseRequestId = ?',
-        whereArgs: [request.id],
-        limit: 1,
-      );
-      if (existingOrders.isNotEmpty) {
-        throw Exception('تم تحويل طلب الشراء من قبل');
-      }
-      if (order.purchaseRequestId != request.id) {
-        throw Exception('ارتباط طلب الشراء غير صالح');
-      }
-      await _validateSupplier(txn, order.supplierId);
-      await _validateOrderItems(txn, order.items);
-      await _saveExecutor(txn, 'purchase_orders', order.id, _orderMap(order));
-      for (final item in order.items) {
-        await txn.insert('purchase_order_items', _orderItemMap(order.id, item));
-      }
-      await txn.update(
-        'purchase_requests',
-        {
-          'status': 'CONVERTED',
-          'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        },
-        where: 'id = ?',
-        whereArgs: [request.id],
-      );
-    });
-    await _auditSafely(
-      action: 'CONVERSION',
-      entityType: 'PurchaseOrder',
-      entityId: order.id,
-      description: 'Purchase request converted to purchase order',
+    if (order.purchaseRequestId != request.id) {
+      throw Exception('ارتباط طلب الشراء غير صالح');
+    }
+    final requestRows = await (await _db).query(
+      'purchase_requests',
+      columns: ['supplierId'],
+      where: 'id = ?',
+      whereArgs: [request.id],
+      limit: 1,
     );
-    return order;
+    if (requestRows.isEmpty ||
+        requestRows.single['supplierId'] != order.supplierId) {
+      throw Exception('يجب أن يرث أمر الشراء مورد الطلب نفسه');
+    }
+    return approveRequest(request.id);
   }
 
   Future<void> changeOrderStatus(String id, PurchaseOrderStatus status) async {
@@ -305,19 +458,43 @@ class PurchasingLocalDataSource {
     );
     if (rows.isEmpty) throw Exception('أمر الشراء غير موجود');
     final current = _orderStatus(rows.first['status'] as String);
-    if (current == PurchaseOrderStatus.cancelled ||
-        current == PurchaseOrderStatus.fullyReceived) {
-      throw Exception('لا يمكن تغيير حالة أمر الشراء');
+    if (!_validOrderTransition(current, status)) {
+      throw Exception('انتقال حالة أمر الشراء غير مسموح');
+    }
+    final order = await _orderFromRow(rows.first);
+    final normalized = _recalculateOrderFinancials(
+      order.copyWith(status: status, updatedAt: DateTime.now()),
+    );
+    _validateOrderFinancialValues(normalized);
+    if (status == PurchaseOrderStatus.approved) {
+      _validateOrderPriceRequirements(normalized.items, normalized.status);
     }
     await db.update(
       'purchase_orders',
       {
-        'status': status.name.toUpperCase(),
+        'status': _databaseOrderStatus(status),
+        'subtotal': normalized.subtotal,
+        'discount': normalized.discount,
+        'tax': normalized.tax,
+        'grandTotal': normalized.grandTotal,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       },
       where: 'id = ?',
       whereArgs: [id],
     );
+    for (final item in normalized.items) {
+      await db.update(
+        'purchase_order_items',
+        {
+          'unitPrice': item.unitPrice,
+          'discount': item.discount,
+          'tax': item.tax,
+          'lineTotal': item.lineTotal,
+        },
+        where: 'id = ?',
+        whereArgs: [item.id],
+      );
+    }
     await _auditSafely(
       action: 'STATUS_CHANGE',
       entityType: 'PurchaseOrder',
@@ -352,8 +529,8 @@ class PurchasingLocalDataSource {
     required String warehouseId,
     required DateTime receiptDate,
     required List<PurchasingItem> items,
+    required String operationId,
     String? notes,
-    String? operationId,
   }) async {
     _security.require('PURCHASING_RECEIVE');
     await _security.requireResourceScope(ScopeType.warehouse, warehouseId);
@@ -364,7 +541,7 @@ class PurchasingLocalDataSource {
       await _validateWarehouse(txn, warehouseId);
       final stateRows = await txn.query(
         'purchase_orders',
-        columns: ['status', 'supplierId'],
+        columns: ['status', 'supplierId', 'purchaseRequestId', 'orderNumber'],
         where: 'id = ?',
         whereArgs: [order.id],
         limit: 1,
@@ -372,10 +549,13 @@ class PurchasingLocalDataSource {
       if (stateRows.isEmpty) throw Exception('أمر الشراء غير موجود');
       final persistedStatus = _orderStatus(stateRows.first['status'] as String);
       if (persistedStatus == PurchaseOrderStatus.cancelled ||
+          persistedStatus == PurchaseOrderStatus.draft ||
           persistedStatus == PurchaseOrderStatus.fullyReceived) {
         throw Exception('لا يمكن استلام أمر الشراء');
       }
       final supplierId = stateRows.first['supplierId'] as String;
+      final purchaseRequestId = stateRows.first['purchaseRequestId'] as String?;
+      final purchaseOrderNumber = stateRows.first['orderNumber'] as String;
       final orderRows = await txn.query(
         'purchase_order_items',
         where: 'purchaseOrderId = ?',
@@ -384,12 +564,10 @@ class PurchasingLocalDataSource {
       final orderById = {for (final row in orderRows) row['id'] as String: row};
       final receiptId = _id('receipt');
       postedReceiptId = receiptId;
-      if (operationId != null && operationId.trim().isEmpty) {
+      if (operationId.trim().isEmpty) {
         throw Exception('معرف العملية غير صالح');
       }
-      final receiptNumber = operationId == null
-          ? _number('GR')
-          : 'GR-OP-${operationId.trim()}';
+      final receiptNumber = 'GR-OP-${operationId.trim()}';
       final duplicateReceipt = await txn.query(
         'purchase_receipts',
         columns: ['id'],
@@ -410,13 +588,16 @@ class PurchasingLocalDataSource {
         'createdAt': DateTime.now().millisecondsSinceEpoch,
       });
       var receivedAny = false;
-      var inventoryTotal = 0.0;
+      final accountingLines = <PurchaseReceiptAccountingLine>[];
       for (final receiptItem in items) {
         final row = orderById[receiptItem.id];
         if (row == null) throw Exception('صنف الاستلام غير موجود في الأمر');
-        if (row['itemId'] != receiptItem.itemId ||
+        if ((row['productId'] as String? ?? row['itemId']) !=
+                receiptItem.itemId ||
             row['itemType'] != receiptItem.itemType.value ||
-            row['unitId'] != receiptItem.unitId) {
+            row['unitId'] != receiptItem.unitId ||
+            row['variantId'] != receiptItem.variantId ||
+            row['unitConversionFactor'] != receiptItem.unitConversionFactor) {
           throw Exception('بيانات صنف الاستلام غير متوافقة');
         }
         final ordered = (row['quantity'] as num).toDouble();
@@ -425,86 +606,97 @@ class PurchasingLocalDataSource {
             receiptItem.quantity > ordered - received) {
           throw Exception('الكمية المستلمة تتجاوز الكمية المتبقية');
         }
+        final approvedUnitPrice = (row['unitPrice'] as num).toDouble();
+        if (!approvedUnitPrice.isFinite || approvedUnitPrice <= 0) {
+          throw Exception('لا يمكن استلام بند دون سعر شراء معتمد صالح');
+        }
         final itemType = row['itemType'] == 'PRODUCT'
             ? StockItemType.product
             : StockItemType.rawMaterial;
-        final item = await _resolveItem(txn, row['itemId'] as String, itemType);
+        final factor = (row['unitConversionFactor'] as num).toDouble();
+        final baseQuantity = receiptItem.quantity * factor;
+        if (!factor.isFinite || factor <= 0 || !baseQuantity.isFinite) {
+          throw Exception('لقطة تحويل وحدة الاستلام غير صالحة');
+        }
+        final item = await _resolveItem(
+          txn,
+          row['productId'] as String? ?? row['itemId'] as String,
+          itemType,
+          variantId: row['variantId'] as String?,
+          baseUnitId: row['baseUnitId'] as String? ?? row['unitId'] as String,
+          identityKind: row['inventoryIdentityKind'] as String? ?? 'BASE',
+        );
         await _stock.applyStockInWithinTransaction(
           executor: txn,
           warehouseId: warehouseId,
           item: item,
-          quantity: receiptItem.quantity,
+          quantity: baseQuantity,
           date: receiptDate,
           reference: receiptNumber,
           notes: notes,
         );
-        final lineTotal = (row['lineTotal'] as num?)?.toDouble() ?? 0;
-        final orderedCost = (row['quantity'] as num).toDouble();
-        inventoryTotal += orderedCost == 0
-            ? 0
-            : receiptItem.quantity * (lineTotal / orderedCost);
-        if (orderedCost > 0) {
-          await _accounting.receiveInventoryValueWithinTransaction(
-            executor: txn,
-            warehouseId: warehouseId,
+        await _accounting.receiveInventoryValueWithinTransaction(
+          executor: txn,
+          warehouseId: warehouseId,
+          itemId: item.inventoryId,
+          itemType: itemType == StockItemType.product
+              ? 'PRODUCT'
+              : 'RAW_MATERIAL',
+          quantity: baseQuantity,
+          unitCost: approvedUnitPrice / factor,
+          productId: item.baseProductId,
+          variantId: item.variantId,
+          identityKind: item.identityKind,
+          unitId: item.unitId,
+        );
+        accountingLines.add(
+          PurchaseReceiptAccountingLine(
+            purchaseOrderItemId: row['id'] as String,
             itemId: row['itemId'] as String,
-            itemType: itemType == StockItemType.product
-                ? 'PRODUCT'
-                : 'RAW_MATERIAL',
-            quantity: receiptItem.quantity,
-            unitCost: lineTotal / orderedCost,
-          );
-        }
+            itemType: row['itemType'] as String,
+            quantity: baseQuantity,
+            approvedUnitPrice: approvedUnitPrice / factor,
+          ),
+        );
         await txn.insert('purchase_receipt_items', {
           'id': _id('receipt-item'),
           'purchaseReceiptId': receiptId,
           'purchaseOrderItemId': receiptItem.id,
           'receivedQuantity': receiptItem.quantity,
           'unitId': row['unitId'],
+          'productId': item.baseProductId,
+          'variantId': item.variantId,
+          'baseUnitId': item.unitId,
+          'unitConversionFactor': factor,
+          'baseQuantity': baseQuantity,
+          'inventoryIdentityKind': item.identityKind.value,
+          'identitySnapshotStatus': row['identitySnapshotStatus'],
           'notes': receiptItem.notes,
         });
         await txn.update(
           'purchase_order_items',
-          {'receivedQuantity': received + receiptItem.quantity},
+          {
+            'receivedQuantity': received + receiptItem.quantity,
+            'receivedBaseQuantity':
+                (row['receivedBaseQuantity'] as num).toDouble() + baseQuantity,
+          },
           where: 'id = ?',
           whereArgs: [receiptItem.id],
         );
         receivedAny = true;
       }
       if (!receivedAny) throw Exception('لم يتم استلام أي صنف');
-      if (inventoryTotal > 0) {
-        final inventory =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['1100'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        final payable =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['2000'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        await _accounting.postJournalWithinTransaction(
-          executor: txn,
-          date: receiptDate,
-          description: 'استلام مشتريات $receiptNumber',
-          referenceType: 'PURCHASE_RECEIPT',
-          referenceId: receiptId,
-          partyType: 'SUPPLIER',
-          partyId: supplierId,
-          lines: [
-            JournalLineInput(accountId: inventory, debit: inventoryTotal),
-            JournalLineInput(accountId: payable, credit: inventoryTotal),
-          ],
-        );
-      }
+      await _accounting.postPurchaseReceiptWithinTransaction(
+        executor: txn,
+        purchaseOrderId: order.id,
+        purchaseOrderNumber: purchaseOrderNumber,
+        purchaseRequestId: purchaseRequestId,
+        receiptId: receiptId,
+        receiptNumber: receiptNumber,
+        supplierId: supplierId,
+        date: receiptDate,
+        lines: accountingLines,
+      );
       final totals = await txn.query(
         'purchase_order_items',
         where: 'purchaseOrderId = ?',
@@ -541,6 +733,17 @@ class PurchasingLocalDataSource {
   )).map(Warehouse.fromMap).toList();
   Future<List<StockItemOption>> activeItems() => _stock.activeItems();
 
+  Future<Map<String, String>> unitNames() async {
+    final rows = await (await _db).query('units');
+    return {
+      for (final row in rows)
+        row['id'] as String:
+            (row['abbreviation'] as String?)?.trim().isNotEmpty == true
+            ? row['abbreviation'] as String
+            : row['name'] as String,
+    };
+  }
+
   Future<PurchaseRequest> _requestFromRow(Map<String, Object?> row) async {
     final items = await _items(
       'purchase_request_items',
@@ -551,6 +754,7 @@ class PurchasingLocalDataSource {
       id: row['id'] as String,
       requestNumber: row['requestNumber'] as String,
       requestDate: _date(row['requestDate']),
+      supplierId: row['supplierId'] as String? ?? '',
       requestedBy: row['requestedBy'] as String,
       notes: row['notes'] as String?,
       status: _requestStatus(row['status'] as String),
@@ -601,21 +805,45 @@ class PurchasingLocalDataSource {
         .map(
           (m) => PurchasingItem(
             id: m['id'] as String,
-            itemId: m['itemId'] as String,
+            itemId: m['productId'] as String? ?? m['itemId'] as String,
             itemType: m['itemType'] == 'PRODUCT'
                 ? PurchasingItemType.product
                 : PurchasingItemType.rawMaterial,
             quantity: (m['quantity'] as num).toDouble(),
             unitId: m['unitId'] as String,
-            unitPrice: (m['unitPrice'] as num?)?.toDouble() ?? 0,
-            discount: (m['discount'] as num?)?.toDouble() ?? 0,
-            tax: (m['tax'] as num?)?.toDouble() ?? 0,
-            lineTotal: (m['lineTotal'] as num?)?.toDouble() ?? 0,
-            receivedQuantity: (m['receivedQuantity'] as num?)?.toDouble() ?? 0,
+            variantId: m['variantId'] as String?,
+            baseUnitId: m['baseUnitId'] as String?,
+            unitConversionFactor:
+                (m['unitConversionFactor'] as num?)?.toDouble() ?? 1,
+            baseQuantity: (m['baseQuantity'] as num?)?.toDouble(),
+            receivedBaseQuantity:
+                (m['receivedBaseQuantity'] as num?)?.toDouble() ?? 0,
+            inventoryIdentityKind:
+                m['inventoryIdentityKind'] as String? ?? 'BASE',
+            identitySnapshotStatus:
+                m['identitySnapshotStatus'] as String? ?? 'UNVERIFIED',
+            unitPrice: _parseStoredDouble(m['unitPrice']),
+            discount: _parseStoredDouble(m['discount']),
+            tax: _parseStoredDouble(m['tax']),
+            lineTotal: _parseStoredDouble(m['lineTotal']),
+            receivedQuantity: _parseStoredDouble(m['receivedQuantity']),
             notes: m['notes'] as String?,
           ),
         )
         .toList();
+  }
+
+  double _parseStoredDouble(Object? value) {
+    if (value == null) return double.nan;
+    if (value is num) {
+      final parsed = value.toDouble();
+      return parsed.isFinite ? parsed : double.nan;
+    }
+    if (value is String) {
+      final parsed = double.tryParse(value);
+      return parsed != null && parsed.isFinite ? parsed : double.nan;
+    }
+    return double.nan;
   }
 
   Future<void> _validateRequestItems(
@@ -623,13 +851,17 @@ class PurchasingLocalDataSource {
     List<PurchasingItem> items,
   ) async {
     if (items.isEmpty) throw Exception('أضف صنفاً واحداً على الأقل');
-    final keys = <String>{};
+    final ids = <String>{};
+    final itemKeys = <String>{};
     for (final item in items) {
+      if (item.id.trim().isEmpty || !ids.add(item.id)) {
+        throw Exception('أرقام بنود الطلب غير صالحة أو مكررة');
+      }
       if (item.quantity <= 0 ||
-          !keys.add('${item.itemType.value}:${item.itemId}')) {
+          !itemKeys.add('${item.itemType.value}:${item.itemId}')) {
         throw Exception('أصناف الطلب غير صالحة أو مكررة');
       }
-      await _validateItem(db, item.itemId, item.itemType, item.unitId);
+      await _validateItem(db, item);
     }
   }
 
@@ -638,11 +870,96 @@ class PurchasingLocalDataSource {
     List<PurchasingItem> items,
   ) async {
     if (items.isEmpty) throw Exception('أضف صنفاً واحداً على الأقل');
+    final ids = <String>{};
+    final itemKeys = <String>{};
     for (final item in items) {
-      if (item.quantity <= 0) {
-        throw Exception('كمية الأمر يجب أن تكون أكبر من صفر');
+      if (item.id.trim().isEmpty || !ids.add(item.id)) {
+        throw Exception('أرقام بنود الأمر غير صالحة أو مكررة');
       }
-      await _validateItem(db, item.itemId, item.itemType, item.unitId);
+      if (item.quantity <= 0 ||
+          !itemKeys.add('${item.itemType.value}:${item.itemId}')) {
+        throw Exception('أصناف الأمر غير صالحة أو مكررة');
+      }
+      await _validateItem(db, item);
+    }
+  }
+
+  PurchaseOrder _recalculateOrderFinancials(PurchaseOrder order) {
+    final items = order.items.map((item) {
+      final lineSubtotal = item.quantity * item.unitPrice;
+      final lineTotal = lineSubtotal - item.discount + item.tax;
+      return item.copyWith(lineTotal: lineTotal);
+    }).toList();
+    final subtotal = items.fold<double>(
+      0,
+      (sum, item) => sum + (item.quantity * item.unitPrice),
+    );
+    final discount = items.fold<double>(0, (sum, item) => sum + item.discount);
+    final tax = items.fold<double>(0, (sum, item) => sum + item.tax);
+    final grandTotal = subtotal - discount + tax;
+    return order.copyWith(
+      subtotal: subtotal,
+      discount: discount,
+      tax: tax,
+      grandTotal: grandTotal,
+      items: items
+          .map(
+            (item) => item.copyWith(
+              lineTotal:
+                  (item.quantity * item.unitPrice) - item.discount + item.tax,
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  void _validateOrderFinancialValues(PurchaseOrder order) {
+    if (!order.subtotal.isFinite ||
+        !order.discount.isFinite ||
+        !order.tax.isFinite ||
+        !order.grandTotal.isFinite) {
+      throw Exception('القيم المالية لأمر الشراء غير صالحة');
+    }
+    for (final item in order.items) {
+      if (!item.quantity.isFinite ||
+          item.quantity <= 0 ||
+          !item.unitPrice.isFinite ||
+          item.unitPrice < 0 ||
+          !item.discount.isFinite ||
+          item.discount < 0 ||
+          !item.tax.isFinite ||
+          item.tax < 0 ||
+          !item.receivedQuantity.isFinite ||
+          item.receivedQuantity < 0 ||
+          !item.lineTotal.isFinite) {
+        throw Exception('قيم بنود أمر الشراء المالية غير صالحة');
+      }
+    }
+  }
+
+  void _validateOrderPriceRequirements(
+    List<PurchasingItem> items,
+    PurchaseOrderStatus status,
+  ) {
+    if (status != PurchaseOrderStatus.approved) {
+      return;
+    }
+    for (final item in items) {
+      if (item.quantity <= 0 ||
+          !item.unitPrice.isFinite ||
+          item.unitPrice <= 0) {
+        throw Exception(
+          'يجب إدخال سعر الوحدة لكل الأصناف قبل اعتماد أمر الشراء',
+        );
+      }
+      if (!item.discount.isFinite ||
+          item.discount < 0 ||
+          !item.tax.isFinite ||
+          item.tax < 0) {
+        throw Exception(
+          'يجب أن تكون الخصومات والضرائب لكل الأصناف صالحة قبل اعتماد أمر الشراء',
+        );
+      }
     }
   }
 
@@ -668,22 +985,91 @@ class PurchasingLocalDataSource {
     if (rows.isEmpty) throw Exception('المخزن غير موجود أو غير نشط');
   }
 
-  Future<void> _validateItem(
-    DatabaseExecutor db,
-    String id,
-    PurchasingItemType type,
-    String unitId,
-  ) async {
+  Future<void> _validateItem(DatabaseExecutor db, PurchasingItem item) async {
     final rows = await db.query(
-      type == PurchasingItemType.product ? 'products' : 'raw_materials',
+      item.itemType == PurchasingItemType.product
+          ? 'products'
+          : 'raw_materials',
       columns: ['id', 'unitId'],
       where: 'id = ? AND active = 1',
-      whereArgs: [id],
+      whereArgs: [item.itemId],
       limit: 1,
     );
     if (rows.isEmpty) throw Exception('الصنف غير موجود أو غير نشط');
-    if (rows.first['unitId'] != unitId) {
-      throw Exception('وحدة الصنف غير متوافقة');
+    final baseUnitId = rows.single['unitId'] as String;
+    if (item.baseUnitId != null && item.baseUnitId != baseUnitId) {
+      throw Exception('الوحدة الأساسية للصنف غير متوافقة');
+    }
+    final units = await db.query(
+      'units',
+      columns: ['id'],
+      where: 'id IN (?, ?) AND active = 1',
+      whereArgs: [baseUnitId, item.unitId],
+    );
+    if (units.length != (baseUnitId == item.unitId ? 1 : 2)) {
+      throw Exception('وحدة الشراء أو الوحدة الأساسية غير موجودة أو غير نشطة');
+    }
+    if (!item.unitConversionFactor.isFinite || item.unitConversionFactor <= 0) {
+      throw Exception('معامل تحويل الوحدة غير صالح');
+    }
+    if (item.itemType == PurchasingItemType.product) {
+      final variants = await db.query(
+        'product_variants',
+        columns: ['id'],
+        where: 'productId = ? AND active = 1',
+        whereArgs: [item.itemId],
+        limit: 1,
+      );
+      if (item.variantId == null && variants.isNotEmpty) {
+        throw Exception('يجب تحديد متغير المنتج');
+      }
+      if (item.variantId != null &&
+          (await db.query(
+            'product_variants',
+            columns: ['id'],
+            where: 'id = ? AND productId = ? AND active = 1',
+            whereArgs: [item.variantId, item.itemId],
+            limit: 1,
+          )).isEmpty) {
+        throw Exception('متغير المنتج غير موجود أو غير نشط');
+      }
+      final expectedIdentityKind = item.variantId == null ? 'BASE' : 'VARIANT';
+      if (item.inventoryIdentityKind != expectedIdentityKind) {
+        throw Exception('هوية مخزون المنتج لا تطابق المتغير المحدد');
+      }
+    } else if (item.variantId != null ||
+        item.inventoryIdentityKind != 'BASE') {
+      throw Exception('هوية الخامة غير صالحة');
+    }
+    if (item.unitId == baseUnitId) {
+      if (item.unitConversionFactor != 1) {
+        throw Exception('معامل تحويل الوحدة الأساسية يجب أن يساوي واحداً');
+      }
+    } else if (item.itemType == PurchasingItemType.product) {
+      final conversions = await db.query(
+        'product_unit_conversions',
+        columns: ['factorToBase'],
+        where: 'productId = ? AND unitId = ? AND active = 1',
+        whereArgs: [item.itemId, item.unitId],
+        limit: 1,
+      );
+      if (conversions.isEmpty) {
+        throw Exception('وحدة الشراء غير معتمدة للمنتج');
+      }
+      final factor = (conversions.single['factorToBase'] as num).toDouble();
+      if (!factor.isFinite ||
+          factor <= 0 ||
+          (factor - item.unitConversionFactor).abs() > 0.000000001) {
+        throw Exception('لقطة تحويل وحدة الشراء غير صالحة');
+      }
+    } else {
+      throw Exception('وحدة الخامة يجب أن تطابق وحدتها الأساسية');
+    }
+    final expectedBaseQuantity = item.quantity * item.unitConversionFactor;
+    if (item.baseQuantity != null &&
+        (!expectedBaseQuantity.isFinite ||
+            (expectedBaseQuantity - item.baseQuantity!).abs() > 0.000001)) {
+      throw Exception('الكمية الأساسية المسجلة غير متوافقة');
     }
   }
 
@@ -757,8 +1143,11 @@ class PurchasingLocalDataSource {
   Future<StockItemOption> _resolveItem(
     DatabaseExecutor db,
     String id,
-    StockItemType type,
-  ) async {
+    StockItemType type, {
+    String? variantId,
+    String? baseUnitId,
+    String identityKind = 'BASE',
+  }) async {
     final table = type == StockItemType.product ? 'products' : 'raw_materials';
     final rows = await db.query(
       table,
@@ -768,13 +1157,47 @@ class PurchasingLocalDataSource {
     );
     if (rows.isEmpty) throw Exception('الصنف غير موجود أو غير نشط');
     final row = rows.first;
+    if (identityKind == 'LEGACY_UNASSIGNED') {
+      throw Exception('لا يمكن استلام مخزون بهوية قديمة غير مخصصة');
+    }
+    if (type == StockItemType.product) {
+      final expectedIdentityKind = variantId == null ? 'BASE' : 'VARIANT';
+      if (identityKind != expectedIdentityKind) {
+        throw Exception('هوية مخزون المنتج لا تطابق المتغير المحدد');
+      }
+      final variants = await db.query(
+        'product_variants',
+        columns: ['id'],
+        where: 'productId = ? AND active = 1',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (variantId == null && variants.isNotEmpty) {
+        throw Exception('يجب تحديد متغير المنتج للاستلام');
+      }
+      if (variantId != null &&
+          (await db.query(
+            'product_variants',
+            columns: ['id'],
+            where: 'id = ? AND productId = ? AND active = 1',
+            whereArgs: [variantId, id],
+            limit: 1,
+          )).isEmpty) {
+        throw Exception('متغير المنتج غير موجود أو غير نشط');
+      }
+    } else if (variantId != null || identityKind != 'BASE') {
+      throw Exception('هوية الخامة غير صالحة');
+    }
     return StockItemOption(
       id: id,
+      productId: type == StockItemType.product ? id : null,
+      variantId: variantId,
       name: row['name'] as String,
       code: row['code'] as String,
-      unitId: row['unitId'] as String,
+      unitId: baseUnitId ?? row['unitId'] as String,
       type: type,
       active: true,
+      identityKind: InventoryIdentityKindValue.parse(identityKind),
     );
   }
 
@@ -782,22 +1205,42 @@ class PurchasingLocalDataSource {
     'id': value.id,
     'requestNumber': value.requestNumber,
     'requestDate': value.requestDate.millisecondsSinceEpoch,
+    'supplierId': value.supplierId,
     'requestedBy': value.requestedBy,
     'notes': value.notes,
     'status': value.status.name.toUpperCase(),
     'createdAt': value.createdAt.millisecondsSinceEpoch,
     'updatedAt': value.updatedAt.millisecondsSinceEpoch,
   };
+  String _purchasingLineStorageId(PurchasingItem item) =>
+      item.itemType == PurchasingItemType.product && item.variantId != null
+      ? inventoryItemKey(
+          productId: item.itemId,
+          type: StockItemType.product,
+          variantId: item.variantId,
+          identityKind: InventoryIdentityKindValue.parse(
+            item.inventoryIdentityKind,
+          ),
+        )
+      : item.itemId;
+
   Map<String, Object?> _requestItemMap(
     String requestId,
     PurchasingItem value,
   ) => {
     'id': value.id,
     'purchaseRequestId': requestId,
-    'itemId': value.itemId,
+    'itemId': _purchasingLineStorageId(value),
+    'productId': value.itemId,
     'itemType': value.itemType.value,
     'quantity': value.quantity,
     'unitId': value.unitId,
+    'variantId': value.variantId,
+    'baseUnitId': value.baseUnitId ?? value.unitId,
+    'unitConversionFactor': value.unitConversionFactor,
+    'baseQuantity': value.baseQuantity ?? value.normalizedBaseQuantity,
+    'inventoryIdentityKind': value.inventoryIdentityKind,
+    'identitySnapshotStatus': value.identitySnapshotStatus,
     'notes': value.notes,
   };
   Map<String, Object?> _orderMap(PurchaseOrder value) => {
@@ -807,10 +1250,7 @@ class PurchasingLocalDataSource {
     'purchaseRequestId': value.purchaseRequestId,
     'orderDate': value.orderDate.millisecondsSinceEpoch,
     'expectedDeliveryDate': value.expectedDeliveryDate?.millisecondsSinceEpoch,
-    'status': value.status.name
-        .replaceAll('partiallyReceived', 'PARTIALLY_RECEIVED')
-        .replaceAll('fullyReceived', 'FULLY_RECEIVED')
-        .toUpperCase(),
+    'status': _databaseOrderStatus(value.status),
     'subtotal': value.subtotal,
     'discount': value.discount,
     'tax': value.tax,
@@ -822,10 +1262,17 @@ class PurchasingLocalDataSource {
   Map<String, Object?> _orderItemMap(String orderId, PurchasingItem value) => {
     'id': value.id,
     'purchaseOrderId': orderId,
-    'itemId': value.itemId,
+    'itemId': _purchasingLineStorageId(value),
+    'productId': value.itemId,
     'itemType': value.itemType.value,
     'quantity': value.quantity,
     'unitId': value.unitId,
+    'variantId': value.variantId,
+    'baseUnitId': value.baseUnitId ?? value.unitId,
+    'unitConversionFactor': value.unitConversionFactor,
+    'baseQuantity': value.baseQuantity ?? value.normalizedBaseQuantity,
+    'inventoryIdentityKind': value.inventoryIdentityKind,
+    'identitySnapshotStatus': value.identitySnapshotStatus,
     'unitPrice': value.unitPrice,
     'discount': value.discount,
     'tax': value.tax,
@@ -833,6 +1280,7 @@ class PurchasingLocalDataSource {
         ? value.quantity * value.unitPrice - value.discount + value.tax
         : value.lineTotal,
     'receivedQuantity': value.receivedQuantity,
+    'receivedBaseQuantity': value.receivedBaseQuantity,
     'notes': value.notes,
   };
   Future<void> _save(
@@ -855,18 +1303,45 @@ class PurchasingLocalDataSource {
     if (count == 0) await db.insert(table, values);
   }
 
+  String _databaseOrderStatus(PurchaseOrderStatus status) => switch (status) {
+    PurchaseOrderStatus.draft => 'DRAFT',
+    PurchaseOrderStatus.approved => 'APPROVED',
+    PurchaseOrderStatus.partiallyReceived => 'PARTIALLY_RECEIVED',
+    PurchaseOrderStatus.fullyReceived => 'FULLY_RECEIVED',
+    PurchaseOrderStatus.cancelled => 'CANCELLED',
+  };
+
   PurchaseRequestStatus _requestStatus(String value) => PurchaseRequestStatus
       .values
       .firstWhere((v) => v.name.toUpperCase() == value);
   PurchaseOrderStatus _orderStatus(String value) =>
-      PurchaseOrderStatus.values.firstWhere(
-        (v) =>
-            v.name
-                .replaceAll('partiallyReceived', 'PARTIALLY_RECEIVED')
-                .replaceAll('fullyReceived', 'FULLY_RECEIVED')
-                .toUpperCase() ==
-            value,
-      );
+      switch (value.toUpperCase()) {
+        'DRAFT' => PurchaseOrderStatus.draft,
+        'APPROVED' => PurchaseOrderStatus.approved,
+        'CONFIRMED' => PurchaseOrderStatus.approved,
+        'PARTIALLY_RECEIVED' => PurchaseOrderStatus.partiallyReceived,
+        'FULLY_RECEIVED' => PurchaseOrderStatus.fullyReceived,
+        'CANCELLED' => PurchaseOrderStatus.cancelled,
+        _ => throw Exception('حالة أمر الشراء غير معروفة: $value'),
+      };
+  bool _validOrderTransition(
+    PurchaseOrderStatus from,
+    PurchaseOrderStatus to,
+  ) =>
+      from == to ||
+      switch (from) {
+        PurchaseOrderStatus.draft =>
+          to == PurchaseOrderStatus.approved ||
+              to == PurchaseOrderStatus.cancelled,
+        PurchaseOrderStatus.approved =>
+          to == PurchaseOrderStatus.partiallyReceived ||
+              to == PurchaseOrderStatus.fullyReceived ||
+              to == PurchaseOrderStatus.cancelled,
+        PurchaseOrderStatus.partiallyReceived =>
+          to == PurchaseOrderStatus.fullyReceived ||
+              to == PurchaseOrderStatus.cancelled,
+        _ => false,
+      };
   bool _validRequestTransition(
     PurchaseRequestStatus from,
     PurchaseRequestStatus to,
@@ -907,8 +1382,6 @@ class PurchasingLocalDataSource {
 
   String _id(String prefix) =>
       '$prefix-${DateTime.now().microsecondsSinceEpoch}-${DateTime.now().millisecond}';
-  String _number(String prefix) =>
-      '$prefix-${DateTime.now().millisecondsSinceEpoch}';
   DateTime _date(Object? value) =>
       DateTime.fromMillisecondsSinceEpoch(value as int);
 }

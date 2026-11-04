@@ -1,6 +1,31 @@
 enum ProductionOrderStatus { draft, planned, inProgress, completed, cancelled }
 
+enum ProductionUnitSnapshotStatus { verified, unverified }
+
+extension ProductionUnitSnapshotStatusValue on ProductionUnitSnapshotStatus {
+  String get value => switch (this) {
+    ProductionUnitSnapshotStatus.verified => 'VERIFIED',
+    ProductionUnitSnapshotStatus.unverified => 'UNVERIFIED',
+  };
+
+  static ProductionUnitSnapshotStatus fromValue(Object? value) =>
+      value == 'VERIFIED'
+      ? ProductionUnitSnapshotStatus.verified
+      : ProductionUnitSnapshotStatus.unverified;
+}
+
+class ProductionUnitSnapshotException implements Exception {
+  const ProductionUnitSnapshotException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 enum ProductionStageStatus { pending, inProgress, completed, skipped }
+
+enum ProductionRequirementStatus { notStarted, partial, complete }
 
 class ProductionRouteStage {
   const ProductionRouteStage({
@@ -66,6 +91,11 @@ class ProductionOrder {
     required this.plannedQuantity,
     required this.producedQuantity,
     required this.status,
+    this.unitId,
+    this.baseUnitId,
+    this.unitConversionFactor,
+    this.plannedBaseQuantity,
+    this.unitSnapshotStatus = ProductionUnitSnapshotStatus.unverified,
     this.startDate,
     this.completionDate,
     this.notes,
@@ -82,29 +112,49 @@ class ProductionOrder {
   final double plannedQuantity;
   final double producedQuantity;
   final ProductionOrderStatus status;
+  final String? unitId;
+  final String? baseUnitId;
+  final double? unitConversionFactor;
+  final double? plannedBaseQuantity;
+  final ProductionUnitSnapshotStatus unitSnapshotStatus;
+  bool get hasVerifiedUnitSnapshot =>
+      unitSnapshotStatus == ProductionUnitSnapshotStatus.verified;
+  double? get remainingBaseQuantity =>
+      hasVerifiedUnitSnapshot ? plannedBaseQuantity! - producedQuantity : null;
   final DateTime? startDate;
   final DateTime? completionDate;
   final String? notes;
   final DateTime createdAt;
   final DateTime updatedAt;
   final List<ProductionOrderStage> stages;
-  double get remainingQuantity => plannedQuantity - producedQuantity;
+  double? get remainingQuantity => remainingBaseQuantity;
 }
 
 class ProductionMaterialRequirement {
   const ProductionMaterialRequirement({
     required this.rawMaterialId,
     required this.rawMaterialName,
+    required this.rawMaterialCode,
     required this.unitId,
+    required this.unitName,
     required this.requiredQuantity,
     required this.consumedQuantity,
   });
   final String rawMaterialId;
   final String rawMaterialName;
+  final String rawMaterialCode;
   final String unitId;
+  final String unitName;
   final double requiredQuantity;
   final double consumedQuantity;
-  double get remainingQuantity => requiredQuantity - consumedQuantity;
+  double get remainingQuantity => (requiredQuantity - consumedQuantity)
+      .clamp(0, double.infinity)
+      .toDouble();
+  ProductionRequirementStatus get status => consumedQuantity <= 0
+      ? ProductionRequirementStatus.notStarted
+      : remainingQuantity <= 0
+      ? ProductionRequirementStatus.complete
+      : ProductionRequirementStatus.partial;
 }
 
 class ProductionMaterialRecord {
@@ -112,19 +162,29 @@ class ProductionMaterialRecord {
     required this.id,
     required this.rawMaterialId,
     required this.rawMaterialName,
+    required this.rawMaterialCode,
     required this.warehouseId,
+    required this.warehouseName,
     required this.quantity,
     required this.unitId,
+    required this.unitName,
     required this.date,
+    required this.unitCost,
+    this.operationId,
     this.notes,
   });
   final String id;
   final String rawMaterialId;
   final String rawMaterialName;
+  final String rawMaterialCode;
   final String warehouseId;
+  final String warehouseName;
   final double quantity;
   final String unitId;
+  final String unitName;
   final DateTime date;
+  final double unitCost;
+  final String? operationId;
   final String? notes;
 }
 
@@ -154,16 +214,36 @@ class ProductionWasteRecord {
 class ProductionOutputRecord {
   const ProductionOutputRecord({
     required this.id,
+    required this.productionOrderId,
+    required this.productId,
+    required this.productName,
+    required this.productCode,
+    this.variantId,
+    this.variantName,
     required this.warehouseId,
+    required this.warehouseName,
     required this.quantity,
     required this.unitId,
+    required this.unitName,
     required this.date,
+    this.operationId,
+    this.costingStatus,
     this.notes,
   });
   final String id;
+  final String productionOrderId;
+  final String productId;
+  final String productName;
+  final String productCode;
+  final String? variantId;
+  final String? variantName;
   final String warehouseId;
+  final String warehouseName;
   final double quantity;
   final String unitId;
+  final String unitName;
   final DateTime date;
+  final String? operationId;
+  final String? costingStatus;
   final String? notes;
 }

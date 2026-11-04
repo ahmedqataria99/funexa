@@ -160,6 +160,16 @@ class AppLocalizations {
   String get factoryName => locale.languageCode == 'ar' ? 'المصنع' : 'Factory';
   String get factoryCode =>
       locale.languageCode == 'ar' ? 'رمز المصنع' : 'Factory code';
+  String get warehousePurpose =>
+      locale.languageCode == 'ar' ? 'غرض المخزن' : 'Warehouse purpose';
+  String get sellableWarehousePurpose =>
+      locale.languageCode == 'ar' ? 'متاح للبيع والإنتاج' : 'Sellable';
+  String get quarantineWarehousePurpose =>
+      locale.languageCode == 'ar' ? 'حجر' : 'Quarantine';
+  String get reworkWarehousePurpose =>
+      locale.languageCode == 'ar' ? 'إعادة العمل' : 'Rework';
+  String get damagedWarehousePurpose =>
+      locale.languageCode == 'ar' ? 'تالف' : 'Damaged';
   String get backupDate =>
       locale.languageCode == 'ar' ? 'تاريخ النسخة' : 'Backup date';
   String get appVersion =>

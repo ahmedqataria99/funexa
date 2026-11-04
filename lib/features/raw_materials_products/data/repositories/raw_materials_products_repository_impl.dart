@@ -15,6 +15,9 @@ class RawMaterialsProductsRepositoryImpl
   Future<List<UnitEntity>> units([String query = '']) =>
       _dataSource.units(query);
   @override
+  Future<List<ProductUnitConversion>> unitConversions(String productId) =>
+      _dataSource.unitConversions(productId);
+  @override
   Future<List<ItemColor>> colors([String query = '']) =>
       _dataSource.colors(query);
   @override
@@ -63,6 +66,12 @@ class RawMaterialsProductsRepositoryImpl
   Future<void> saveCategory(Category value) => _dataSource.saveCategory(value);
   @override
   Future<void> saveUnit(UnitEntity value) => _dataSource.saveUnit(value);
+  @override
+  Future<void> saveUnitConversion(ProductUnitConversion value) =>
+      _dataSource.saveUnitConversion(value);
+  @override
+  Future<void> setUnitConversionActive(String id, bool active) =>
+      _dataSource.setUnitConversionActive(id, active);
   @override
   Future<void> saveColor(ItemColor value) => _dataSource.saveColor(value);
   @override

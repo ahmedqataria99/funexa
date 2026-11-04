@@ -4,10 +4,12 @@ import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities
 
 abstract class PurchasingRepository {
   Future<List<Supplier>> suppliers([String query = '']);
+  Future<Supplier?> supplierById(String id);
   Future<void> saveSupplier(Supplier supplier);
   Future<void> setSupplierActive(String id, bool active);
   Future<List<PurchaseRequest>> requests([String query = '']);
   Future<PurchaseRequest> saveRequest(PurchaseRequest request);
+  Future<PurchaseOrder> approveRequest(String requestId);
   Future<PurchaseOrder> convertRequestToOrder(
     PurchaseRequest request,
     PurchaseOrder order,
@@ -22,9 +24,10 @@ abstract class PurchasingRepository {
     required String warehouseId,
     required DateTime receiptDate,
     required List<PurchasingItem> items,
+    required String operationId,
     String? notes,
-    String? operationId,
   });
   Future<List<Warehouse>> activeWarehouses();
   Future<List<StockItemOption>> activeItems();
+  Future<Map<String, String>> unitNames();
 }

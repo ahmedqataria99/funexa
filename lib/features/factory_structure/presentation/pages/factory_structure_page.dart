@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
+import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/core/shared/ui/error_state.dart';
 import 'package:furnexa/core/shared/ui/loading_state.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_form.dart';
@@ -304,12 +305,27 @@ class _FactoryStructurePageState extends State<FactoryStructurePage> {
   }
 
   Future<void> _editWarehouse([Warehouse? current]) async {
+    final localizations = AppLocalizations.of(context);
     final values = await _form(
       title: current == null ? 'إضافة مخزن' : 'تعديل المخزن',
       fields: [
         _Field('name', 'اسم المخزن', current?.name),
         _Field('code', 'كود المخزن', current?.code),
         _Field('type', 'النوع (اختياري)', current?.type, optional: true),
+        _Field(
+          'purpose',
+          localizations.warehousePurpose,
+          current?.purpose.value ?? WarehousePurpose.sellable.value,
+          options: {
+            WarehousePurpose.sellable.value:
+                localizations.sellableWarehousePurpose,
+            WarehousePurpose.quarantine.value:
+                localizations.quarantineWarehousePurpose,
+            WarehousePurpose.rework.value: localizations.reworkWarehousePurpose,
+            WarehousePurpose.damaged.value:
+                localizations.damagedWarehousePurpose,
+          },
+        ),
         _Field(
           'notes',
           'الملاحظات',
@@ -337,6 +353,7 @@ class _FactoryStructurePageState extends State<FactoryStructurePage> {
           name: values['name']!,
           code: values['code']!,
           type: _optional(values['type']),
+          purpose: WarehousePurpose.fromStorage(values['purpose']),
           state: values['state'] ?? 'active',
           notes: _optional(values['notes']),
           createdAt: current?.createdAt ?? now,
@@ -345,6 +362,16 @@ class _FactoryStructurePageState extends State<FactoryStructurePage> {
       ),
     );
     if (saved) await _saved('تم حفظ المخزن بنجاح');
+  }
+
+  String _warehousePurposeLabel(WarehousePurpose purpose) {
+    final localizations = AppLocalizations.of(context);
+    return switch (purpose) {
+      WarehousePurpose.sellable => localizations.sellableWarehousePurpose,
+      WarehousePurpose.quarantine => localizations.quarantineWarehousePurpose,
+      WarehousePurpose.rework => localizations.reworkWarehousePurpose,
+      WarehousePurpose.damaged => localizations.damagedWarehousePurpose,
+    };
   }
 
   Future<void> _toggleSection(Section value) async {
@@ -652,7 +679,7 @@ class _FactoryStructurePageState extends State<FactoryStructurePage> {
                   (value) => _record(
                     value.id,
                     value.name,
-                    '${value.code} • ${value.type ?? 'بدون نوع'}',
+                    '${value.code} • ${value.type ?? 'بدون نوع'} • ${_warehousePurposeLabel(value.purpose)}',
                     value.state == 'active',
                     _canEditWarehouse ? () => _editWarehouse(value) : null,
                     _canEditWarehouse ? () => _toggleWarehouse(value) : null,
@@ -797,6 +824,7 @@ class _Field {
     this.formatters,
     this.maxLines = 1,
     this.optional = false,
+    this.options,
   });
   final String key;
   final String label;
@@ -805,6 +833,7 @@ class _Field {
   final List<TextInputFormatter>? formatters;
   final int maxLines;
   final bool optional;
+  final Map<String, String>? options;
 }
 
 class _Select {
@@ -835,6 +864,7 @@ class _EntityForm extends StatefulWidget {
 class _EntityFormState extends State<_EntityForm> {
   final _formKey = GlobalKey<FormState>();
   final _controllers = <String, TextEditingController>{};
+  final _selections = <String, String?>{};
   String? _selection;
 
   @override
@@ -845,6 +875,7 @@ class _EntityFormState extends State<_EntityForm> {
       _controllers[field.key] = TextEditingController(
         text: field.initial ?? '',
       );
+      if (field.options != null) _selections[field.key] = field.initial;
     }
   }
 
@@ -861,6 +892,8 @@ class _EntityFormState extends State<_EntityForm> {
     final values = <String, String>{
       for (final entry in _controllers.entries)
         entry.key: entry.value.text.trim(),
+      for (final entry in _selections.entries)
+        if (entry.value != null) entry.key: entry.value!,
     };
     if (widget.select != null && _selection != null) {
       values[widget.select!.key] = _selection!;
@@ -884,8 +917,32 @@ class _EntityFormState extends State<_EntityForm> {
             FurnexaFormSection(
               title: widget.title,
               children: [
-                ...widget.fields.map(
-                  (field) => TextFormField(
+                ...widget.fields.map((field) {
+                  final options = field.options;
+                  if (options != null) {
+                    return DropdownButtonFormField<String>(
+                      initialValue: _selections[field.key],
+                      decoration: InputDecoration(
+                        labelText: field.optional
+                            ? field.label
+                            : '${field.label} *',
+                      ),
+                      items: options.entries
+                          .map(
+                            (entry) => DropdownMenuItem(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) =>
+                          setState(() => _selections[field.key] = value),
+                      validator: field.optional
+                          ? null
+                          : (value) => value == null ? 'هذا الحقل مطلوب' : null,
+                    );
+                  }
+                  return TextFormField(
                     controller: _controllers[field.key],
                     autofocus: field == widget.fields.first,
                     keyboardType: field.keyboardType,
@@ -901,8 +958,8 @@ class _EntityFormState extends State<_EntityForm> {
                         : (value) => value == null || value.trim().isEmpty
                               ? 'هذا الحقل مطلوب'
                               : null,
-                  ),
-                ),
+                  );
+                }),
                 if (widget.select != null)
                   DropdownButtonFormField<String>(
                     initialValue: _selection,

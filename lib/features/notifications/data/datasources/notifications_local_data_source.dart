@@ -1,5 +1,6 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/notifications/data/models/notification_model.dart';
 import 'package:furnexa/features/notifications/domain/entities/notification_entity.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
@@ -154,6 +155,9 @@ class NotificationsLocalDataSource {
     required String warehouseId,
     required String itemId,
     required String itemType,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
     bool adjustment = false,
   }) async {
     final db = await _db;
@@ -176,7 +180,13 @@ class NotificationsLocalDataSource {
       limit: 1,
     );
     final eventId = latest.isEmpty ? 'initial' : latest.first['id'] as String;
-    final itemName = await _itemName(db, itemId, itemType);
+    final itemName = await _itemName(
+      db,
+      productId ?? itemId,
+      itemType,
+      variantId: variantId,
+      identityKind: identityKind,
+    );
     if (adjustment) {
       await createNotification(
         type: NotificationType.stockAdjustment,
@@ -236,6 +246,11 @@ class NotificationsLocalDataSource {
         warehouseId: row['warehouseId'] as String,
         itemId: row['itemId'] as String,
         itemType: row['itemType'] as String,
+        productId: row['productId'] as String?,
+        variantId: row['variantId'] as String?,
+        identityKind: InventoryIdentityKindValue.parse(
+          row['inventoryIdentityKind'],
+        ),
       );
     }
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -475,7 +490,13 @@ class NotificationsLocalDataSource {
       ? 'PRODUCTION_STAGE'
       : value.name.toUpperCase();
 
-  Future<String> _itemName(Database db, String itemId, String itemType) async {
+  Future<String> _itemName(
+    Database db,
+    String itemId,
+    String itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  }) async {
     final table = itemType == 'RAW_MATERIAL' ? 'raw_materials' : 'products';
     final rows = await db.query(
       table,
@@ -484,7 +505,23 @@ class NotificationsLocalDataSource {
       whereArgs: [itemId],
       limit: 1,
     );
-    return rows.isEmpty ? itemId : rows.first['name'] as String;
+    if (rows.isEmpty) return itemId;
+    if (identityKind == InventoryIdentityKind.legacyUnassigned) {
+      return '${rows.first['name']} • مخزون قديم غير مخصص';
+    }
+    if (variantId != null) {
+      final variants = await db.query(
+        'product_variants',
+        columns: ['name'],
+        where: 'id = ? AND productId = ?',
+        whereArgs: [variantId, itemId],
+        limit: 1,
+      );
+      if (variants.isNotEmpty) {
+        return '${rows.first['name']} • ${variants.single['name']}';
+      }
+    }
+    return rows.first['name'] as String;
   }
 
   String _requireUser() {

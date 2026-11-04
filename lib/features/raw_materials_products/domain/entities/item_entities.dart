@@ -68,6 +68,44 @@ class UnitEntity {
   );
 }
 
+class ProductUnitConversion {
+  const ProductUnitConversion({
+    required this.id,
+    required this.productId,
+    required this.unitId,
+    required this.factorToBase,
+    this.active = true,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final String id, productId, unitId;
+  final double factorToBase;
+  final bool active;
+  final DateTime createdAt, updatedAt;
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'productId': productId,
+    'unitId': unitId,
+    'factorToBase': factorToBase,
+    'active': active ? 1 : 0,
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+  };
+
+  factory ProductUnitConversion.fromMap(Map<String, Object?> row) =>
+      ProductUnitConversion(
+        id: row['id'] as String,
+        productId: row['productId'] as String,
+        unitId: row['unitId'] as String,
+        factorToBase: (row['factorToBase'] as num).toDouble(),
+        active: row['active'] == 1,
+        createdAt: _date(row['createdAt']),
+        updatedAt: _date(row['updatedAt']),
+      );
+}
+
 class ItemColor {
   ItemColor({
     required this.id,

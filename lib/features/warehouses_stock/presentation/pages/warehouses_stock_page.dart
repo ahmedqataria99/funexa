@@ -385,8 +385,10 @@ class _WarehousesStockPageState extends State<WarehousesStockPage> {
     }
     final rows = await _repository.ledger(
       _warehouseId!,
-      line.item.id,
+      line.item.baseProductId,
       line.item.type,
+      variantId: line.item.variantId,
+      identityKind: line.item.identityKind,
     );
     if (!mounted) return;
     await showDialog<void>(

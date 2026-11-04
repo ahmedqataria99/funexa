@@ -1015,6 +1015,7 @@ class _ProductProfileDialog extends StatefulWidget {
 
 class _ProductProfileDialogState extends State<_ProductProfileDialog> {
   List<ProductVariant> variants = [];
+  List<ProductUnitConversion> unitConversions = [];
   List<ProductAlternative> alternatives = [];
   List<ProductDimension> dimensions = [];
   List<BomItem> bom = [];
@@ -1028,6 +1029,7 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
   Future<void> _load() async {
     final result = await Future.wait([
       widget.repository.variants(widget.product.id),
+      widget.repository.unitConversions(widget.product.id),
       widget.repository.getAlternatives(widget.product.id),
       widget.repository.dimensions(widget.product.id),
       widget.repository.bom(widget.product.id),
@@ -1035,9 +1037,10 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
     if (mounted) {
       setState(() {
         variants = result[0] as List<ProductVariant>;
-        alternatives = result[1] as List<ProductAlternative>;
-        dimensions = result[2] as List<ProductDimension>;
-        bom = result[3] as List<BomItem>;
+        unitConversions = result[1] as List<ProductUnitConversion>;
+        alternatives = result[2] as List<ProductAlternative>;
+        dimensions = result[3] as List<ProductDimension>;
+        bom = result[4] as List<BomItem>;
         loading = false;
       });
     }
@@ -1053,13 +1056,14 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
       child: loading
           ? const Center(child: CircularProgressIndicator())
           : DefaultTabController(
-              length: 5,
+              length: 6,
               child: Column(
                 children: [
                   const TabBar(
                     tabs: [
                       Tab(text: 'البيانات الأساسية'),
                       Tab(text: 'المتغيرات'),
+                      Tab(text: 'وحدات البيع'),
                       Tab(text: 'البدائل'),
                       Tab(text: 'الأبعاد'),
                       Tab(text: 'مكونات المنتج'),
@@ -1070,6 +1074,7 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
                       children: [
                         _summary(),
                         _variantsView(),
+                        _unitConversionsView(),
                         _alternativesView(),
                         _dimensionsView(),
                         _bomView(),
@@ -1248,6 +1253,56 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
         .toList(),
     widget.canEdit && widget.product.active ? _addAlternative : null,
   );
+
+  Widget _unitConversionsView() => _profileList(
+    'وحدات البيع والتحويل إلى الوحدة الأساسية',
+    unitConversions.map((conversion) {
+      final unit = widget.units
+          .where((value) => value.id == conversion.unitId)
+          .firstOrNull;
+      return ListTile(
+        title: Text(unit?.name ?? conversion.unitId),
+        subtitle: Text(
+          '1 ${unit?.abbreviation ?? ''} = ${conversion.factorToBase} ${widget.units.where((value) => value.id == widget.product.unitId).firstOrNull?.abbreviation ?? widget.product.unitId}',
+        ),
+        trailing: IconButton(
+          tooltip: conversion.active ? 'تعطيل' : 'تفعيل',
+          icon: Icon(conversion.active ? Icons.toggle_on : Icons.toggle_off),
+          onPressed: () async {
+            await widget.repository.setUnitConversionActive(
+              conversion.id,
+              !conversion.active,
+            );
+            await _load();
+          },
+        ),
+      );
+    }).toList(),
+    () => _unitConversionForm(),
+  );
+
+  Future<void> _unitConversionForm([ProductUnitConversion? current]) async {
+    final conversion = await showDialog<ProductUnitConversion>(
+      context: context,
+      builder: (_) => _ProductUnitConversionEditor(
+        product: widget.product,
+        units: widget.units,
+        current: current,
+      ),
+    );
+    if (conversion == null) return;
+    try {
+      await widget.repository.saveUnitConversion(conversion);
+      await _load();
+      await widget.onSaved();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    }
+  }
 
   Future<void> _addAlternative() async {
     final selection = await showDialog<_AlternativeSelection>(
@@ -1458,6 +1513,121 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
 }
 
 typedef _AlternativeSelection = ({String targetProductId, int priority});
+
+class _ProductUnitConversionEditor extends StatefulWidget {
+  const _ProductUnitConversionEditor({
+    required this.product,
+    required this.units,
+    this.current,
+  });
+
+  final Product product;
+  final List<UnitEntity> units;
+  final ProductUnitConversion? current;
+
+  @override
+  State<_ProductUnitConversionEditor> createState() =>
+      _ProductUnitConversionEditorState();
+}
+
+class _ProductUnitConversionEditorState
+    extends State<_ProductUnitConversionEditor> {
+  final formKey = GlobalKey<FormState>();
+  late String? unitId = widget.current?.unitId;
+  late final factorController = TextEditingController(
+    text: widget.current?.factorToBase.toString() ?? '',
+  );
+
+  @override
+  void dispose() {
+    factorController.dispose();
+    super.dispose();
+  }
+
+  void save() {
+    if (!formKey.currentState!.validate()) return;
+    final factor = double.parse(factorController.text.trim());
+    final now = DateTime.now();
+    Navigator.pop(
+      context,
+      ProductUnitConversion(
+        id:
+            widget.current?.id ??
+            'unit-conversion-${now.microsecondsSinceEpoch}',
+        productId: widget.product.id,
+        unitId: unitId!,
+        factorToBase: factor,
+        active: widget.current?.active ?? true,
+        createdAt: widget.current?.createdAt ?? now,
+        updatedAt: now,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.current == null ? 'إضافة وحدة بيع' : 'تعديل وحدة البيع'),
+    content: Form(
+      key: formKey,
+      child: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButtonFormField<String>(
+              initialValue: unitId,
+              decoration: const InputDecoration(labelText: 'الوحدة البديلة'),
+              items: widget.units
+                  .where(
+                    (unit) =>
+                        unit.id != widget.product.unitId &&
+                        (unit.active || unit.id == widget.current?.unitId),
+                  )
+                  .map(
+                    (unit) => DropdownMenuItem(
+                      value: unit.id,
+                      child: Text(unit.name),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) => setState(() => unitId = value),
+              validator: (value) => value == null ? 'اختر وحدة' : null,
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: factorController,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: InputDecoration(
+                labelText: 'كمية الوحدة الأساسية لكل وحدة بديلة',
+                helperText:
+                    'الوحدة الأساسية: ${widget.units.where((unit) => unit.id == widget.product.unitId).firstOrNull?.name ?? widget.product.unitId}',
+              ),
+              validator: (value) {
+                final factor = double.tryParse(value?.trim() ?? '');
+                return factor == null || !factor.isFinite || factor <= 0
+                    ? 'أدخل معامل تحويل أكبر من صفر'
+                    : null;
+              },
+            ),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('إلغاء'),
+      ),
+      FilledButton.icon(
+        onPressed: save,
+        icon: const Icon(Icons.save_outlined),
+        label: const Text('حفظ'),
+      ),
+    ],
+  );
+}
 
 class _ProductAlternativePickerDialog extends StatefulWidget {
   const _ProductAlternativePickerDialog({

@@ -26,11 +26,12 @@ abstract class SalesRepository {
     String? destination,
     String? notes,
   });
-  Future<void> postDelivery({
+  Future<SalesDelivery> postDelivery({
     required SalesOrder order,
     required String warehouseId,
     required DateTime deliveryDate,
     required List<SalesItem> items,
+    required String operationId,
     String? notes,
   });
   Future<List<Warehouse>> activeWarehouses();

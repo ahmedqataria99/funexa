@@ -19,6 +19,7 @@ class _AccountingPageState extends State<AccountingPage> {
   List<Account> _accounts = [];
   List<TrialBalanceLine> _trialBalance = [];
   List<AccountingPeriod> _periods = [];
+  List<PurchaseCommitment> _purchaseCommitments = [];
   Map<String, int> _moduleCounts = {};
   FinancialStatement? _incomeStatement;
   BalanceSheet? _balanceSheet;
@@ -37,6 +38,7 @@ class _AccountingPageState extends State<AccountingPage> {
       final balanceSheet = await _source.balanceSheet();
       final periods = await _source.periods();
       final moduleCounts = await _source.moduleCounts();
+      final purchaseCommitments = await _source.purchaseCommitments();
       if (!mounted) return;
       setState(() {
         _accounts = accounts;
@@ -45,6 +47,7 @@ class _AccountingPageState extends State<AccountingPage> {
         _balanceSheet = balanceSheet;
         _periods = periods;
         _moduleCounts = moduleCounts;
+        _purchaseCommitments = purchaseCommitments;
         _loading = false;
       });
     } catch (error) {
@@ -173,6 +176,8 @@ class _AccountingPageState extends State<AccountingPage> {
                   const SizedBox(height: 16),
                   _periodsCard(),
                   const SizedBox(height: 12),
+                  _purchaseCommitmentsCard(),
+                  const SizedBox(height: 12),
                   Card(
                     child: ExpansionTile(
                       leading: const Icon(Icons.account_tree_outlined),
@@ -263,6 +268,39 @@ class _AccountingPageState extends State<AccountingPage> {
     );
   }
 
+  Widget _purchaseCommitmentsCard() => Card(
+    child: ExpansionTile(
+      leading: const Icon(Icons.local_shipping_outlined),
+      title: const Text('التزامات أوامر الشراء المعتمدة'),
+      subtitle: Text('${_purchaseCommitments.length} أمر شراء مفتوح'),
+      children: _purchaseCommitments.isEmpty
+          ? [const ListTile(title: Text('لا توجد التزامات شراء مفتوحة'))]
+          : [
+              for (final commitment in _purchaseCommitments)
+                ExpansionTile(
+                  title: Text(commitment.orderNumber),
+                  subtitle: Text(
+                    '${commitment.supplierName} | المورد ${commitment.supplierId}${commitment.purchaseRequestId == null ? '' : ' | الطلب ${commitment.purchaseRequestId}'}',
+                  ),
+                  trailing: Text(
+                    commitment.outstandingValue.toStringAsFixed(2),
+                  ),
+                  children: [
+                    for (final line in commitment.lines)
+                      ListTile(
+                        dense: true,
+                        title: Text('${line.itemId} | ${line.itemType}'),
+                        subtitle: Text(
+                          'مستلم ${line.receivedQuantity} من ${line.orderedQuantity} | المتبقي ${line.remainingQuantity} × ${line.unitPrice.toStringAsFixed(2)}',
+                        ),
+                        trailing: Text(line.remainingValue.toStringAsFixed(2)),
+                      ),
+                  ],
+                ),
+            ],
+    ),
+  );
+
   Widget _statCard(String title, String value, IconData icon) {
     return SizedBox(
       width: 190,
@@ -295,4 +333,66 @@ class _AccountingPageState extends State<AccountingPage> {
       ),
     );
   }
+}
+
+class AccountingJournalEntryDetailsPage extends StatelessWidget {
+  const AccountingJournalEntryDetailsPage({
+    super.key,
+    required this.entry,
+    required this.accounts,
+  });
+
+  final JournalEntry entry;
+  final List<Account> accounts;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text('القيد ${entry.entryNumber}')),
+    body: ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        ListTile(
+          title: const Text('التاريخ'),
+          subtitle: Text(_date(entry.date)),
+        ),
+        ListTile(title: const Text('الوصف'), subtitle: Text(entry.description)),
+        ListTile(
+          title: const Text('الحالة'),
+          subtitle: Text(entry.status.name.toUpperCase()),
+        ),
+        if (entry.referenceType != null)
+          ListTile(
+            title: const Text('نوع المرجع'),
+            subtitle: Text(entry.referenceType!),
+          ),
+        if (entry.referenceId != null)
+          ListTile(
+            title: const Text('معرف المرجع'),
+            subtitle: Text(entry.referenceId!),
+          ),
+        const Divider(),
+        for (final line in entry.lines)
+          Card(
+            child: ListTile(
+              title: Text(
+                accounts
+                        .where((account) => account.id == line.accountId)
+                        .firstOrNull
+                        ?.name ??
+                    line.accountId,
+              ),
+              subtitle: line.description == null
+                  ? null
+                  : Text(line.description!),
+              trailing: Text(
+                'مدين ${line.debit.toStringAsFixed(2)}  دائن ${line.credit.toStringAsFixed(2)}',
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  String _date(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 }

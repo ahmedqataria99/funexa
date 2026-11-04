@@ -47,151 +47,6 @@
 		{
 			"label": "flutter analyze",
 			"type": "shell",
-			"command": "flutter analyze",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter build windows",
-			"type": "shell",
-			"command": "flutter build windows",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "build"
-		},
-		{
-			"label": "flutter test serial",
-			"type": "shell",
-			"command": "flutter test --concurrency=1",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test all",
-			"type": "shell",
-			"command": "flutter test --concurrency=1",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter analyze pricing",
-			"type": "shell",
-			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "build"
-		},
-		{
-			"label": "flutter analyze pricing",
-			"type": "shell",
-			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "build"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter test full summary",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; $LASTEXITCODE; Get-Content test-output.txt -Tail 40",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "flutter analyze pricing",
-			"type": "shell",
-			"command": "flutter analyze lib/features/pricing lib/core/database/furnexa_database.dart lib/core/constants/app_constants.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "build"
-		},
-		{
-			"label": "flutter test pricing",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "pricing suite",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "pricing suite",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 test/pricing_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "full regression suite",
-			"type": "shell",
-			"command": "flutter test --concurrency=1",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "full regression summary",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; echo EXIT:$LASTEXITCODE; Get-Content test-output.txt -Tail 60",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "clear native asset crash",
-			"type": "shell",
-			"command": "Remove-Item -Path \"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\\windows\" -Recurse -Force -ErrorAction SilentlyContinue; Get-ChildItem \"D:\\avatar\\vs code\\My APPS\\furnexa\\build\\native_assets\" -Force",
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
@@ -477,6 +332,491 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
-		}
+		},
+		{
+			"label": "Run requested Dart analysis once",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\dart.bat",
+			"args": [
+				"analyze",
+				"lib",
+				"test"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Rerun requested Dart analysis after local fix",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\dart.bat",
+			"args": [
+				"analyze",
+				"lib",
+				"test"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Purchase request migration persistence tests",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/purchasing_supplier_migration_test.dart",
+				"test/purchasing_feature_test.dart",
+				"test/database_persistence_integration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Identify stalled purchasing test process",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -in @(5524,12232) } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Stop stalled purchasing test only",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$all = Get-CimInstance Win32_Process; $ids = [System.Collections.Generic.HashSet[int]]::new(); [void]$ids.Add(12232); do { $count = $ids.Count; foreach ($process in $all) { if ($ids.Contains([int]$process.ParentProcessId)) { [void]$ids.Add([int]$process.ProcessId) } } } while ($ids.Count -gt $count); foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }; Write-Output \"Stopped stalled test process tree rooted at 12232: $($ids -join ',')\""
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Stop stalled purchasing test processes",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Stop-Process -Id 12232,20416,5524 -Force -ErrorAction SilentlyContinue; Write-Host 'Stopped stalled purchasing test processes.'"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build Furnexa Windows Release after migration",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"build",
+				"windows",
+				"--release"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Read-only Furnexa database baseline",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"-c",
+				"import sqlite3; p=r'C:\\Users\\ahmed\\AppData\\Local\\Furnexa\\furnexa.db'; c=sqlite3.connect('file:'+p.replace('\\\\','/')+'?mode=ro', uri=True); print('DB_EXISTS=True'); print('USER_VERSION=', c.execute('PRAGMA user_version').fetchone()[0]); print('REQUEST_COLUMNS=', [r[1] for r in c.execute('PRAGMA table_info(purchase_requests)')]); print('FOREIGN_KEYS=', list(c.execute('PRAGMA foreign_key_list(purchase_requests)'))); print('COUNTS=', {t:c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('suppliers','purchase_requests','purchase_orders','warehouses','stock_balances')})"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Read-only existing DB baseline retry",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"-c",
+				"import sqlite3; p=r\"C:\\Users\\ahmed\\AppData\\Local\\Furnexa\\furnexa.db\"; c=sqlite3.connect(\"file:\"+p.replace(\"\\\\\",\"/\")+\"?mode=ro\", uri=True); print(\"USER_VERSION\",c.execute(\"PRAGMA user_version\").fetchone()[0]); print(\"REQUEST_COLUMNS\",[r[1] for r in c.execute(\"PRAGMA table_info(purchase_requests)\")]); print(\"FOREIGN_KEYS\",list(c.execute(\"PRAGMA foreign_key_list(purchase_requests)\"))); print(\"COUNTS\",{t:c.execute(\"SELECT COUNT(*) FROM \"+t).fetchone()[0] for t in (\"suppliers\",\"purchase_requests\",\"purchase_orders\",\"warehouses\",\"stock_balances\")})"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Inspect live Furnexa database before launch",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"tool/inspect_existing_furnexa_db.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Launch Furnexa Release against existing DB",
+			"type": "shell",
+			"command": "build\\windows\\x64\\runner\\Release\\furnexa.exe",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Inspect live Furnexa database after launch",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"tool/inspect_existing_furnexa_db.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Check Furnexa Release process",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name furnexa -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,MainWindowTitle,MainWindowHandle | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Focused Purchase Request save persistence test",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"--plain-name",
+				"approved request conversion preserves request and links order",
+				"test/purchasing_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Verify real request UPDATE with rollback",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"tool/verify_purchase_request_update_rollback.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Read committed task configuration",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"show",
+				"HEAD:.vscode/tasks.json"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Inspect reported item row",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"tool/inspect_duplicate_request_item.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Analyze duplicate request line ID fix",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\dart.bat",
+			"args": [
+				"analyze",
+				"lib",
+				"test"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Run Purchase Request lifecycle regressions",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"--name",
+				"creates one request|reads supplier and all material line values back|saving the same request again|editing line quantity|failed line replacement|approved request conversion preserves request and links order",
+				"test/purchasing_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Run database persistence integration test",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/database_persistence_integration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Check active purchasing integration test",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name flutter_tester,dart -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime | Format-Table -AutoSize"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Stop stalled integration test and this session app",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Stop-Process -Id 18784,14708,1176 -Force -ErrorAction SilentlyContinue; Write-Host 'Stopped stalled test and this session Release process.'"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build Windows Release after request ID fix",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"build",
+				"windows",
+				"--release"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Recheck exact same request resave",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"--name",
+				"creates one request|reads supplier and all material line values back|saving the same request again|editing line quantity|failed line replacement|approved request conversion preserves request and links order",
+				"test/purchasing_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Confirm current Furnexa Release launch",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name furnexa -ErrorAction SilentlyContinue | Select-Object Id,StartTime,MainWindowTitle,MainWindowHandle | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Analyze current purchasing workflow",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\dart.bat",
+			"args": [
+				"analyze",
+				"lib",
+				"test"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Test purchasing approval and order lifecycle",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"--name",
+				"creates one request|reads supplier and all material|request requires and persists|saving the same request|editing line quantity|failed line replacement|purchase order saves and resaves|failed purchase order line insert|approval automatically creates|request conversion is idempotent|supplier create, update",
+				"test/purchasing_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Inspect selected purchasing test process",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('dart.exe','flutter_tester.exe') } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Check Purchasing test process state",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name flutter_tester,dart -ErrorAction SilentlyContinue"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Read selected purchasing test process timing",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process -Name flutter_tester,dart -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime,CPU"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build Windows Release for automatic purchasing conversion",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"build",
+				"windows",
+				"--release"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary Phase 2 focused tests",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--concurrency=1",
+				"test/production_feature_test.dart",
+				"test/production_unit_snapshot_migration_test.dart",
+				"test/inventory_identity_migration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary Phase 2 focused tests expanded",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--reporter=expanded",
+				"--concurrency=1",
+				"test/production_feature_test.dart",
+				"test/production_unit_snapshot_migration_test.dart",
+				"test/inventory_identity_migration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary Phase 2 targeted regressions",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--reporter=expanded",
+				"--concurrency=1",
+				"--name",
+				"new base order persists|variant order stores product-level|inactive base unit prevents|unverified and inconsistent snapshots|later product unit changes|partial output uses the verified|variant output posts only|consumption operation replay is idempotent|consumption and output integrate with stock atomically|production orders keep their BOM snapshot|order creation rejects a stale product unit",
+				"test/production_feature_test.dart",
+				"test/production_unit_snapshot_migration_test.dart",
+				"test/inventory_identity_migration_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary Phase 2 partial output test",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--reporter=expanded",
+				"--concurrency=1",
+				"--name",
+				"partial output uses the verified planned base quantity limit",
+				"test/production_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Temporary Phase 2 Production regression suite",
+			"type": "shell",
+			"command": "C:\\flutter\\bin\\flutter.bat",
+			"args": [
+				"test",
+				"--reporter=expanded",
+				"--concurrency=1",
+				"--name",
+				"new base order persists|variant order stores product-level|inactive base unit prevents|unverified and inconsistent snapshots|later product unit changes|partial output uses the verified|variant output posts only|consumption operation replay is idempotent|consumption and output integrate with stock atomically|production orders keep their BOM snapshot|order creation rejects a stale product unit",
+				"test/production_feature_test.dart"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
 	]
 }

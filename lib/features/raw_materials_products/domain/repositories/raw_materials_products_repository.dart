@@ -3,6 +3,7 @@ import 'package:furnexa/features/raw_materials_products/domain/entities/item_ent
 abstract class RawMaterialsProductsRepository {
   Future<List<Category>> categories([String query = '']);
   Future<List<UnitEntity>> units([String query = '']);
+  Future<List<ProductUnitConversion>> unitConversions(String productId);
   Future<List<ItemColor>> colors([String query = '']);
   Future<List<RawMaterial>> rawMaterials([
     String query = '',
@@ -30,6 +31,8 @@ abstract class RawMaterialsProductsRepository {
   Future<List<BomItem>> bom(String productId);
   Future<void> saveCategory(Category value);
   Future<void> saveUnit(UnitEntity value);
+  Future<void> saveUnitConversion(ProductUnitConversion value);
+  Future<void> setUnitConversionActive(String id, bool active);
   Future<void> saveColor(ItemColor value);
   Future<void> saveRawMaterial(RawMaterial value);
   Future<void> saveProduct(Product value);

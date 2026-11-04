@@ -198,8 +198,13 @@ void main() {
       'productId': productId,
       'routeId': routeId,
       'plannedQuantity': 10,
-      'producedQuantity': 0,
+      'producedQuantity': 10,
       'status': 'COMPLETED',
+      'unitId': unitId,
+      'baseUnitId': unitId,
+      'unitConversionFactor': 1,
+      'plannedBaseQuantity': 10,
+      'unitSnapshotStatus': 'VERIFIED',
       'createdAt': now.millisecondsSinceEpoch,
       'updatedAt': now.millisecondsSinceEpoch,
     });
@@ -221,6 +226,23 @@ void main() {
       'unitId': unitId,
       'consumptionDate': now.millisecondsSinceEpoch,
       'createdAt': now.millisecondsSinceEpoch,
+    });
+    await db.insert('production_outputs', {
+      'id': 'output-$suffix',
+      'operationId': 'output-operation-$suffix',
+      'productionOrderId': orderId,
+      'warehouseId': warehouseId,
+      'quantity': 10,
+      'unitId': unitId,
+      'outputDate': now.millisecondsSinceEpoch,
+      'createdAt': now.millisecondsSinceEpoch,
+      'productId': productId,
+      'variantId': null,
+      'baseUnitId': unitId,
+      'unitConversionFactor': 1,
+      'baseQuantity': 10,
+      'inventoryIdentityKind': 'BASE',
+      'identitySnapshotStatus': 'VERIFIED',
     });
     await db.insert('attendance_records', {
       'id': 'att-$suffix',
@@ -568,6 +590,245 @@ void main() {
     );
   });
 
+  test('finalization requires persisted production completion', () async {
+    final batch = await costing.calculateBatchCost(
+      productionOrderId: orderId,
+      laborCost: 100,
+      overheadRate: 0,
+      goodFinishedQuantity: 10,
+    );
+    for (final status in ['DRAFT', 'PLANNED', 'IN_PROGRESS']) {
+      await db.update(
+        'production_orders',
+        {'status': status},
+        where: 'id = ?',
+        whereArgs: [orderId],
+      );
+      await expectLater(
+        costing.finalizeBatchCost(orderId, 'admin'),
+        throwsException,
+      );
+    }
+    expect(
+      (await db.query(
+        'production_batch_costs',
+        where: 'productionOrderId = ?',
+        whereArgs: [orderId],
+      )).single['status'],
+      CostStatus.calculated.value,
+    );
+    expect(
+      await db.query(
+        'inventory_valuations',
+        where: 'itemId = ? AND itemType = ?',
+        whereArgs: [productId, 'PRODUCT'],
+      ),
+      isEmpty,
+    );
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['PRODUCTION_COST', '$orderId:$warehouseId'],
+      ),
+      isEmpty,
+    );
+    expect(batch.status, CostStatus.calculated);
+  });
+
+  test('finalization rejects legacy and inconsistent unit snapshots', () async {
+    await costing.calculateBatchCost(
+      productionOrderId: orderId,
+      laborCost: 100,
+      overheadRate: 0,
+      goodFinishedQuantity: 10,
+    );
+    await db.update(
+      'production_orders',
+      {
+        'unitSnapshotStatus': 'UNVERIFIED',
+        'unitId': null,
+        'baseUnitId': null,
+        'unitConversionFactor': null,
+        'plannedBaseQuantity': null,
+      },
+      where: 'id = ?',
+      whereArgs: [orderId],
+    );
+    await expectLater(
+      costing.finalizeBatchCost(orderId, 'admin'),
+      throwsException,
+    );
+
+    await db.update(
+      'production_orders',
+      {
+        'unitSnapshotStatus': 'VERIFIED',
+        'unitId': unitId,
+        'baseUnitId': unitId,
+        'unitConversionFactor': 2,
+        'plannedBaseQuantity': 10,
+      },
+      where: 'id = ?',
+      whereArgs: [orderId],
+    );
+    await expectLater(
+      costing.finalizeBatchCost(orderId, 'admin'),
+      throwsException,
+    );
+
+    await db.execute('PRAGMA ignore_check_constraints = ON');
+    try {
+      for (final field in [
+        'unitId',
+        'baseUnitId',
+        'unitConversionFactor',
+        'plannedBaseQuantity',
+      ]) {
+        await db.update(
+          'production_orders',
+          {
+            'unitSnapshotStatus': 'VERIFIED',
+            'unitId': unitId,
+            'baseUnitId': unitId,
+            'unitConversionFactor': 1,
+            'plannedBaseQuantity': 10,
+          },
+          where: 'id = ?',
+          whereArgs: [orderId],
+        );
+        await db.update(
+          'production_orders',
+          {field: null},
+          where: 'id = ?',
+          whereArgs: [orderId],
+        );
+        await expectLater(
+          costing.finalizeBatchCost(orderId, 'admin'),
+          throwsException,
+        );
+      }
+    } finally {
+      await db.update(
+        'production_orders',
+        {
+          'unitSnapshotStatus': 'VERIFIED',
+          'unitId': unitId,
+          'baseUnitId': unitId,
+          'unitConversionFactor': 1,
+          'plannedBaseQuantity': 10,
+        },
+        where: 'id = ?',
+        whereArgs: [orderId],
+      );
+      await db.execute('PRAGMA ignore_check_constraints = OFF');
+    }
+
+    await db.update(
+      'production_orders',
+      {'plannedBaseQuantity': 9},
+      where: 'id = ?',
+      whereArgs: [orderId],
+    );
+    await expectLater(
+      costing.finalizeBatchCost(orderId, 'admin'),
+      throwsException,
+    );
+    expect(
+      (await db.query(
+        'production_batch_costs',
+        where: 'productionOrderId = ?',
+        whereArgs: [orderId],
+      )).single['status'],
+      CostStatus.calculated.value,
+    );
+  });
+
+  test(
+    'finalization rejects missing and inconsistent finished outputs',
+    () async {
+      final batch = await costing.calculateBatchCost(
+        productionOrderId: orderId,
+        laborCost: 100,
+        overheadRate: 0,
+        goodFinishedQuantity: 10,
+      );
+      await db.delete(
+        'production_outputs',
+        where: 'productionOrderId = ?',
+        whereArgs: [orderId],
+      );
+      await expectLater(
+        costing.finalizeBatchCost(orderId, 'admin'),
+        throwsException,
+      );
+      expect(batch.status, CostStatus.calculated);
+
+      await db.insert('production_outputs', {
+        'id': 'invalid-output-$suffix',
+        'operationId': 'invalid-output-operation-$suffix',
+        'productionOrderId': orderId,
+        'warehouseId': warehouseId,
+        'quantity': 10,
+        'unitId': unitId,
+        'outputDate': now.millisecondsSinceEpoch,
+        'createdAt': now.millisecondsSinceEpoch,
+        'productId': productId,
+        'variantId': null,
+        'baseUnitId': unitId,
+        'unitConversionFactor': 1,
+        'baseQuantity': 9,
+        'inventoryIdentityKind': 'BASE',
+        'identitySnapshotStatus': 'VERIFIED',
+      });
+      await expectLater(
+        costing.finalizeBatchCost(orderId, 'admin'),
+        throwsException,
+      );
+      await db.update(
+        'production_outputs',
+        {'baseQuantity': 0},
+        where: 'productionOrderId = ?',
+        whereArgs: [orderId],
+      );
+      await expectLater(
+        costing.finalizeBatchCost(orderId, 'admin'),
+        throwsException,
+      );
+      expect(
+        await db.query(
+          'inventory_valuations',
+          where: 'itemId = ? AND itemType = ?',
+          whereArgs: [productId, 'PRODUCT'],
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test('finalization rejects zero total production cost', () async {
+    final batch = await costing.calculateBatchCost(
+      productionOrderId: orderId,
+      laborCost: 0,
+      overheadRate: 0,
+      scrapRecovery: 1000,
+      goodFinishedQuantity: 10,
+    );
+    expect(batch.totalCost, 0);
+    await expectLater(
+      costing.finalizeBatchCost(orderId, 'admin'),
+      throwsException,
+    );
+    expect(
+      (await db.query(
+        'production_batch_costs',
+        where: 'productionOrderId = ?',
+        whereArgs: [orderId],
+      )).single['status'],
+      CostStatus.calculated.value,
+    );
+  });
+
   test('12. estimated and actual cost remain separate', () async {
     final estimate = await costing.estimateProductCost(productId, quantity: 10);
     final batch = await costing.calculateBatchCost(
@@ -612,7 +873,7 @@ void main() {
       productionOrderId: orderId,
       laborCost: 500,
       overheadRate: 20,
-      goodFinishedQuantity: 8,
+      goodFinishedQuantity: 10,
     );
     final finalized = await costing.finalizeBatchCost(
       batch.productionOrderId,
@@ -633,7 +894,7 @@ void main() {
         productionOrderId: orderId,
         laborCost: 400,
         overheadRate: 10,
-        goodFinishedQuantity: 9,
+        goodFinishedQuantity: 10,
       );
       final finalized = await costing.finalizeBatchCost(
         batch.productionOrderId,
@@ -690,7 +951,7 @@ void main() {
       productionOrderId: orderId,
       laborCost: 400,
       overheadRate: 10,
-      goodFinishedQuantity: 8,
+      goodFinishedQuantity: 10,
     );
 
     final variance = await costing.costVariance(orderId);
@@ -702,7 +963,7 @@ void main() {
       productionOrderId: orderId,
       laborCost: 400,
       overheadRate: 10,
-      goodFinishedQuantity: 8,
+      goodFinishedQuantity: 10,
     );
     await costing.finalizeBatchCost(batch.productionOrderId, 'admin');
 
@@ -746,7 +1007,7 @@ void main() {
       productionOrderId: orderId,
       laborCost: 100,
       overheadRate: 0,
-      goodFinishedQuantity: 9,
+      goodFinishedQuantity: 10,
     );
     await costing.finalizeBatchCost(batch.productionOrderId, 'admin');
 
@@ -759,7 +1020,7 @@ void main() {
       productionOrderId: orderId,
       laborCost: 400,
       overheadRate: 10,
-      goodFinishedQuantity: 9,
+      goodFinishedQuantity: 10,
     );
     await costing.finalizeBatchCost(batch.productionOrderId, 'admin');
 

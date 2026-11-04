@@ -64,6 +64,12 @@ class SalesReturnItem {
     required this.itemType,
     required this.quantity,
     required this.unitId,
+    this.variantId,
+    this.baseUnitId,
+    this.unitConversionFactor = 1,
+    this.baseQuantity,
+    this.inventoryIdentityKind = 'BASE',
+    this.identitySnapshotStatus = 'UNVERIFIED',
     this.unitPrice = 0,
     this.reason,
     this.notes,
@@ -77,6 +83,11 @@ class SalesReturnItem {
   final String itemType;
   final double quantity;
   final String unitId;
+  final String? variantId, baseUnitId;
+  final double unitConversionFactor;
+  final double? baseQuantity;
+  final String inventoryIdentityKind;
+  final String identitySnapshotStatus;
   final double unitPrice;
   final String? reason;
   final String? notes;
@@ -84,13 +95,24 @@ class SalesReturnItem {
   final String? sourceDeliveryId;
   final String? sourceDeliveryItemId;
 
-  Map<String, Object?> toMap(String salesReturnId) => {
+  Map<String, Object?> toMap(
+    String salesReturnId, {
+    String? identitySnapshotStatus,
+  }) => {
     'id': id,
     'salesReturnId': salesReturnId,
     'itemId': itemId,
+    'productId': itemId,
     'itemType': itemType,
     'quantity': quantity,
     'unitId': unitId,
+    'variantId': variantId,
+    'baseUnitId': baseUnitId,
+    'unitConversionFactor': unitConversionFactor,
+    'baseQuantity': baseQuantity ?? quantity * unitConversionFactor,
+    'inventoryIdentityKind': inventoryIdentityKind,
+    'identitySnapshotStatus':
+        identitySnapshotStatus ?? this.identitySnapshotStatus,
     'unitPrice': unitPrice,
     'reason': reason,
     'qualityStatus': qualityStatus.value,
@@ -104,6 +126,14 @@ class SalesReturnItem {
     itemType: row['itemType'] as String,
     quantity: (row['quantity'] as num).toDouble(),
     unitId: row['unitId'] as String,
+    variantId: row['variantId'] as String?,
+    baseUnitId: row['baseUnitId'] as String?,
+    unitConversionFactor:
+        (row['unitConversionFactor'] as num?)?.toDouble() ?? 1,
+    baseQuantity: (row['baseQuantity'] as num?)?.toDouble(),
+    inventoryIdentityKind: row['inventoryIdentityKind'] as String? ?? 'BASE',
+    identitySnapshotStatus:
+        row['identitySnapshotStatus'] as String? ?? 'UNVERIFIED',
     unitPrice: (row['unitPrice'] as num?)?.toDouble() ?? 0,
     reason: row['reason'] as String?,
     notes: row['notes'] as String?,
@@ -182,11 +212,18 @@ class PurchaseReturnItem {
     required this.itemType,
     required this.quantity,
     required this.unitId,
+    this.variantId,
+    this.baseUnitId,
+    this.unitConversionFactor = 1,
+    this.baseQuantity,
+    this.inventoryIdentityKind = 'BASE',
+    this.identitySnapshotStatus = 'UNVERIFIED',
     this.unitPrice = 0,
     this.reason,
     this.notes,
     this.qualityStatus = ReturnQualityStatus.pending,
     this.sourceReceiptId,
+    this.purchaseOrderItemId,
   });
 
   final String id;
@@ -194,19 +231,40 @@ class PurchaseReturnItem {
   final String itemType;
   final double quantity;
   final String unitId;
+  final String? variantId, baseUnitId;
+  final double unitConversionFactor;
+  final double? baseQuantity;
+  final String inventoryIdentityKind;
+  final String identitySnapshotStatus;
   final double unitPrice;
   final String? reason;
   final String? notes;
   final ReturnQualityStatus qualityStatus;
   final String? sourceReceiptId;
+  final String? purchaseOrderItemId;
 
-  Map<String, Object?> toMap(String purchaseReturnId) => {
+  Map<String, Object?> toMap(
+    String purchaseReturnId, {
+    String? purchaseOrderItemId,
+    String? identitySnapshotStatus,
+    String? sourceReceiptId,
+  }) => {
     'id': id,
     'purchaseReturnId': purchaseReturnId,
     'itemId': itemId,
+    'productId': itemId,
+    'purchaseOrderItemId': purchaseOrderItemId ?? this.purchaseOrderItemId,
+    'sourceReceiptId': sourceReceiptId ?? this.sourceReceiptId,
     'itemType': itemType,
     'quantity': quantity,
     'unitId': unitId,
+    'variantId': variantId,
+    'baseUnitId': baseUnitId,
+    'unitConversionFactor': unitConversionFactor,
+    'baseQuantity': baseQuantity ?? quantity * unitConversionFactor,
+    'inventoryIdentityKind': inventoryIdentityKind,
+    'identitySnapshotStatus':
+        identitySnapshotStatus ?? this.identitySnapshotStatus,
     'unitPrice': unitPrice,
     'reason': reason,
     'qualityStatus': qualityStatus.value,
@@ -220,11 +278,21 @@ class PurchaseReturnItem {
         itemType: row['itemType'] as String,
         quantity: (row['quantity'] as num).toDouble(),
         unitId: row['unitId'] as String,
+        variantId: row['variantId'] as String?,
+        baseUnitId: row['baseUnitId'] as String?,
+        unitConversionFactor:
+            (row['unitConversionFactor'] as num?)?.toDouble() ?? 1,
+        baseQuantity: (row['baseQuantity'] as num?)?.toDouble(),
+        inventoryIdentityKind:
+            row['inventoryIdentityKind'] as String? ?? 'BASE',
+        identitySnapshotStatus:
+            row['identitySnapshotStatus'] as String? ?? 'UNVERIFIED',
         unitPrice: (row['unitPrice'] as num?)?.toDouble() ?? 0,
         reason: row['reason'] as String?,
         notes: row['notes'] as String?,
         qualityStatus: _returnQualityStatus(row['qualityStatus'] as String?),
         sourceReceiptId: row['sourceReceiptId'] as String?,
+        purchaseOrderItemId: row['purchaseOrderItemId'] as String?,
       );
 }
 
@@ -299,6 +367,18 @@ class QualityInspectionItem {
     required this.inspectedQuantity,
     required this.acceptedQuantity,
     required this.rejectedQuantity,
+    this.sourceReturnItemId,
+    this.productId,
+    this.variantId,
+    this.inventoryIdentityKind,
+    this.identitySnapshotStatus,
+    this.unitId,
+    this.baseUnitId,
+    this.unitConversionFactor,
+    this.requestedBaseQuantity,
+    this.inspectedBaseQuantity,
+    this.acceptedBaseQuantity,
+    this.rejectedBaseQuantity,
     this.result = QualityInspectionResult.passed,
     this.notes,
   });
@@ -310,35 +390,74 @@ class QualityInspectionItem {
   final double inspectedQuantity;
   final double acceptedQuantity;
   final double rejectedQuantity;
+  final String? sourceReturnItemId;
+  final String? productId, variantId;
+  final String? inventoryIdentityKind, identitySnapshotStatus;
+  final String? unitId, baseUnitId;
+  final double? unitConversionFactor;
+  final double? requestedBaseQuantity,
+      inspectedBaseQuantity,
+      acceptedBaseQuantity,
+      rejectedBaseQuantity;
   final QualityInspectionResult result;
   final String? notes;
 
-  Map<String, Object?> toMap(String inspectionId) => {
-    'id': id,
-    'inspectionId': inspectionId,
-    'itemId': itemId,
-    'itemType': itemType,
-    'requestedQuantity': requestedQuantity,
-    'inspectedQuantity': inspectedQuantity,
-    'acceptedQuantity': acceptedQuantity,
-    'rejectedQuantity': rejectedQuantity,
-    'result': result.value,
-    'notes': notes,
-    'createdAt': DateTime.now().millisecondsSinceEpoch,
-  };
+  Map<String, Object?> toMap(String inspectionId) {
+    final factor = unitConversionFactor ?? 1;
+    return {
+      'id': id,
+      'inspectionId': inspectionId,
+      'itemId': itemId,
+      'sourceReturnItemId': sourceReturnItemId,
+      'productId': productId ?? itemId,
+      'variantId': variantId,
+      'inventoryIdentityKind': inventoryIdentityKind ?? 'BASE',
+      'identitySnapshotStatus': identitySnapshotStatus ?? 'UNVERIFIED',
+      'unitId': unitId,
+      'baseUnitId': baseUnitId,
+      'unitConversionFactor': factor,
+      'itemType': itemType,
+      'requestedQuantity': requestedQuantity,
+      'inspectedQuantity': inspectedQuantity,
+      'acceptedQuantity': acceptedQuantity,
+      'rejectedQuantity': rejectedQuantity,
+      'requestedBaseQuantity':
+          requestedBaseQuantity ?? requestedQuantity * factor,
+      'inspectedBaseQuantity':
+          inspectedBaseQuantity ?? inspectedQuantity * factor,
+      'acceptedBaseQuantity': acceptedBaseQuantity ?? acceptedQuantity * factor,
+      'rejectedBaseQuantity': rejectedBaseQuantity ?? rejectedQuantity * factor,
+      'result': result.value,
+      'notes': notes,
+      'createdAt': DateTime.now().millisecondsSinceEpoch,
+    };
+  }
 
-  factory QualityInspectionItem.fromMap(Map<String, Object?> row) =>
-      QualityInspectionItem(
-        id: row['id'] as String,
-        itemId: row['itemId'] as String,
-        itemType: row['itemType'] as String,
-        requestedQuantity: (row['requestedQuantity'] as num).toDouble(),
-        inspectedQuantity: (row['inspectedQuantity'] as num).toDouble(),
-        acceptedQuantity: (row['acceptedQuantity'] as num).toDouble(),
-        rejectedQuantity: (row['rejectedQuantity'] as num).toDouble(),
-        result: _inspectionResult(row['result'] as String?),
-        notes: row['notes'] as String?,
-      );
+  factory QualityInspectionItem.fromMap(
+    Map<String, Object?> row,
+  ) => QualityInspectionItem(
+    id: row['id'] as String,
+    itemId: row['itemId'] as String,
+    itemType: row['itemType'] as String,
+    sourceReturnItemId: row['sourceReturnItemId'] as String?,
+    productId: row['productId'] as String?,
+    variantId: row['variantId'] as String?,
+    inventoryIdentityKind: row['inventoryIdentityKind'] as String?,
+    identitySnapshotStatus: row['identitySnapshotStatus'] as String?,
+    unitId: row['unitId'] as String?,
+    baseUnitId: row['baseUnitId'] as String?,
+    unitConversionFactor: (row['unitConversionFactor'] as num?)?.toDouble(),
+    requestedQuantity: (row['requestedQuantity'] as num).toDouble(),
+    inspectedQuantity: (row['inspectedQuantity'] as num).toDouble(),
+    acceptedQuantity: (row['acceptedQuantity'] as num).toDouble(),
+    rejectedQuantity: (row['rejectedQuantity'] as num).toDouble(),
+    requestedBaseQuantity: (row['requestedBaseQuantity'] as num?)?.toDouble(),
+    inspectedBaseQuantity: (row['inspectedBaseQuantity'] as num?)?.toDouble(),
+    acceptedBaseQuantity: (row['acceptedBaseQuantity'] as num?)?.toDouble(),
+    rejectedBaseQuantity: (row['rejectedBaseQuantity'] as num?)?.toDouble(),
+    result: _inspectionResult(row['result'] as String?),
+    notes: row['notes'] as String?,
+  );
 }
 
 class QualityInspection {
@@ -393,23 +512,26 @@ class QualityInspection {
     'updatedAt': updatedAt.millisecondsSinceEpoch,
   };
 
-  factory QualityInspection.fromMap(Map<String, Object?> row) =>
-      QualityInspection(
-        id: row['id'] as String,
-        inspectionNumber: row['inspectionNumber'] as String,
-        sourceType: row['sourceType'] as String,
-        sourceId: row['sourceId'] as String,
-        warehouseId: row['warehouseId'] as String?,
-        itemId: row['itemId'] as String,
-        itemType: row['itemType'] as String,
-        inspectedBy: row['inspectedBy'] as String?,
-        inspectionDate: _date(row['inspectionDate']),
-        status: _inspectionStatus(row['status'] as String?),
-        result: _inspectionResult(row['result'] as String?),
-        notes: row['notes'] as String?,
-        createdAt: _date(row['createdAt']),
-        updatedAt: _date(row['updatedAt']),
-      );
+  factory QualityInspection.fromMap(
+    Map<String, Object?> row, {
+    List<QualityInspectionItem> items = const [],
+  }) => QualityInspection(
+    id: row['id'] as String,
+    inspectionNumber: row['inspectionNumber'] as String,
+    sourceType: row['sourceType'] as String,
+    sourceId: row['sourceId'] as String,
+    warehouseId: row['warehouseId'] as String?,
+    itemId: row['itemId'] as String,
+    itemType: row['itemType'] as String,
+    inspectedBy: row['inspectedBy'] as String?,
+    inspectionDate: _date(row['inspectionDate']),
+    status: _inspectionStatus(row['status'] as String?),
+    result: _inspectionResult(row['result'] as String?),
+    notes: row['notes'] as String?,
+    createdAt: _date(row['createdAt']),
+    updatedAt: _date(row['updatedAt']),
+    items: items,
+  );
 }
 
 DateTime _date(Object? value) =>

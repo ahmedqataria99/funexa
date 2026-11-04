@@ -1,4 +1,5 @@
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 
 abstract class WarehousesStockRepository {
@@ -12,13 +13,17 @@ abstract class WarehousesStockRepository {
   Future<List<StockLedgerLine>> ledger(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  );
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  });
   Future<double> balance(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  );
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  });
   Future<void> stockIn({
     required String warehouseId,
     required StockItemOption item,

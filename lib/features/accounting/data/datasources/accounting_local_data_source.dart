@@ -4,11 +4,17 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
+import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/accounting/domain/entities/accounting_entities.dart';
 import 'package:furnexa/features/accounting/domain/production_costing_contract.dart';
+import 'package:furnexa/features/accounting/domain/purchasing_receiving_contract.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 
-class AccountingLocalDataSource implements ProductionCostingAccountingSink {
+class AccountingLocalDataSource
+    implements
+        ProductionCostingAccountingSink,
+        PurchasingReceiptAccountingSink {
   static int _sequence = 0;
 
   Future<Database> get _db async => FurnexaDatabase.instance.database;
@@ -39,6 +45,65 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       counts[table] = (rows.single['count'] as num).toInt();
     }
     return counts;
+  }
+
+  Future<List<PurchaseCommitment>> purchaseCommitments() async {
+    await SecurityLocalDataSource().requireFresh('ACCOUNTING_VIEW');
+    final db = await _db;
+    final orderRows = await db.rawQuery('''
+      SELECT po.id, po.orderNumber, po.supplierId, po.purchaseRequestId,
+             s.name AS supplierName
+      FROM purchase_orders po
+      JOIN suppliers s ON s.id = po.supplierId
+      WHERE po.status IN ('APPROVED', 'CONFIRMED', 'PARTIALLY_RECEIVED')
+      ORDER BY po.orderDate DESC, po.orderNumber ASC
+    ''');
+    final commitments = <PurchaseCommitment>[];
+    for (final order in orderRows) {
+      final itemRows = await db.query(
+        'purchase_order_items',
+        where: 'purchaseOrderId = ?',
+        whereArgs: [order['id']],
+        orderBy: 'rowid ASC',
+      );
+      final lines = <PurchaseCommitmentLine>[];
+      for (final row in itemRows) {
+        final quantity = (row['quantity'] as num).toDouble();
+        final received = (row['receivedQuantity'] as num).toDouble();
+        final unitPrice = (row['unitPrice'] as num).toDouble();
+        if (!quantity.isFinite ||
+            !received.isFinite ||
+            !unitPrice.isFinite ||
+            quantity <= 0 ||
+            received < 0 ||
+            received > quantity ||
+            unitPrice <= 0) {
+          throw Exception('بيانات التزام أمر الشراء غير صالحة');
+        }
+        if (received == quantity) continue;
+        lines.add(
+          PurchaseCommitmentLine(
+            itemId: row['itemId'] as String,
+            itemType: row['itemType'] as String,
+            orderedQuantity: quantity,
+            receivedQuantity: received,
+            unitPrice: unitPrice,
+          ),
+        );
+      }
+      if (lines.isEmpty) continue;
+      commitments.add(
+        PurchaseCommitment(
+          purchaseOrderId: order['id'] as String,
+          orderNumber: order['orderNumber'] as String,
+          supplierId: order['supplierId'] as String,
+          supplierName: order['supplierName'] as String,
+          purchaseRequestId: order['purchaseRequestId'] as String?,
+          lines: lines,
+        ),
+      );
+    }
+    return commitments;
   }
 
   Future<Account> createAccount({
@@ -264,6 +329,54 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     );
   }
 
+  Future<JournalEntry?> journalEntryByReference({
+    required String referenceType,
+    required String referenceId,
+  }) async {
+    await SecurityLocalDataSource().requireFresh('ACCOUNTING_VIEW');
+    final db = await _db;
+    final rows = await db.query(
+      'journal_entries',
+      where: 'referenceType = ? AND referenceId = ?',
+      whereArgs: [referenceType, referenceId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.single;
+    final lineRows = await db.query(
+      'journal_lines',
+      where: 'journalEntryId = ?',
+      whereArgs: [row['id']],
+      orderBy: 'rowid ASC',
+    );
+    final status = switch (row['status']) {
+      'POSTED' => JournalEntryStatus.posted,
+      'REVERSED' => JournalEntryStatus.reversed,
+      _ => JournalEntryStatus.draft,
+    };
+    return JournalEntry(
+      id: row['id'] as String,
+      entryNumber: row['entryNumber'] as String,
+      date: DateTime.fromMillisecondsSinceEpoch(row['date'] as int),
+      description: row['description'] as String,
+      referenceType: row['referenceType'] as String?,
+      referenceId: row['referenceId'] as String?,
+      status: status,
+      lines: lineRows
+          .map(
+            (line) => JournalLineInput(
+              accountId: line['accountId'] as String,
+              debit: (line['debit'] as num).toDouble(),
+              credit: (line['credit'] as num).toDouble(),
+              description: line['description'] as String?,
+            ),
+          )
+          .toList(),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row['createdAt'] as int),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row['updatedAt'] as int),
+    );
+  }
+
   Future<String> postJournalWithinTransaction({
     required DatabaseExecutor executor,
     required DateTime date,
@@ -327,6 +440,87 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       description: 'Accounting journal posted: ${referenceType ?? 'MANUAL'}',
     );
     return entryId;
+  }
+
+  @override
+  Future<String> postPurchaseReceiptWithinTransaction({
+    required DatabaseExecutor executor,
+    required String purchaseOrderId,
+    required String purchaseOrderNumber,
+    required String? purchaseRequestId,
+    required String receiptId,
+    required String receiptNumber,
+    required String supplierId,
+    required DateTime date,
+    required List<PurchaseReceiptAccountingLine> lines,
+  }) async {
+    if (lines.isEmpty) throw Exception('لا توجد بنود مالية لإيصال الاستلام');
+    final inventoryRows = await executor.query(
+      'accounts',
+      columns: ['id'],
+      where: 'code = ? AND active = 1',
+      whereArgs: ['1100'],
+      limit: 1,
+    );
+    final payableRows = await executor.query(
+      'accounts',
+      columns: ['id'],
+      where: 'code = ? AND active = 1',
+      whereArgs: ['2000'],
+      limit: 1,
+    );
+    if (inventoryRows.isEmpty || payableRows.isEmpty) {
+      throw Exception('حساب المخزون أو الموردين غير نشط');
+    }
+    final inventoryAccountId = inventoryRows.single['id'] as String;
+    final payableAccountId = payableRows.single['id'] as String;
+    final journalLines = <JournalLineInput>[];
+    for (final line in lines) {
+      if (line.quantity <= 0 ||
+          !line.quantity.isFinite ||
+          line.approvedUnitPrice <= 0 ||
+          !line.approvedUnitPrice.isFinite) {
+        throw Exception('قيمة بند الاستلام المحاسبية غير صالحة');
+      }
+      final value = line.quantity * line.approvedUnitPrice;
+      if (!value.isFinite || value <= 0) {
+        throw Exception('قيمة بند الاستلام المحاسبية غير صالحة');
+      }
+      final trace = [
+        'PO=$purchaseOrderId',
+        if (purchaseRequestId != null) 'PR=$purchaseRequestId',
+        'receipt=$receiptId/$receiptNumber',
+        'PO-line=${line.purchaseOrderItemId}',
+        'item=${line.itemId}/${line.itemType}',
+        'qty=${line.quantity}',
+        'approved-unit-price=${line.approvedUnitPrice}',
+      ].join(' | ');
+      journalLines.add(
+        JournalLineInput(
+          accountId: inventoryAccountId,
+          debit: value,
+          description: trace,
+        ),
+      );
+      journalLines.add(
+        JournalLineInput(
+          accountId: payableAccountId,
+          credit: value,
+          description: trace,
+        ),
+      );
+    }
+    return postJournalWithinTransaction(
+      executor: executor,
+      date: date,
+      description:
+          'استلام $receiptNumber لأمر الشراء $purchaseOrderNumber${purchaseRequestId == null ? '' : ' وطلب الشراء $purchaseRequestId'}',
+      referenceType: 'PURCHASE_RECEIPT',
+      referenceId: receiptId,
+      partyType: 'SUPPLIER',
+      partyId: supplierId,
+      lines: journalLines,
+    );
   }
 
   Future<String> createDraftJournal({
@@ -858,6 +1052,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     required String itemType,
     required double quantity,
     required double unitCost,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+    String? unitId,
   }) async {
     final db = await _db;
     return db.transaction(
@@ -868,10 +1066,15 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
         itemType: itemType,
         quantity: quantity,
         unitCost: unitCost,
+        productId: productId,
+        variantId: variantId,
+        identityKind: identityKind,
+        unitId: unitId,
       ),
     );
   }
 
+  @override
   Future<InventoryValuation> receiveInventoryValueWithinTransaction({
     required DatabaseExecutor executor,
     required String warehouseId,
@@ -879,6 +1082,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     required String itemType,
     required double quantity,
     required double unitCost,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+    String? unitId,
   }) => _changeValuation(
     executor,
     warehouseId,
@@ -887,6 +1094,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     quantity,
     unitCost,
     true,
+    productId: productId,
+    variantId: variantId,
+    identityKind: identityKind,
+    unitId: unitId,
   );
 
   Future<InventoryValuation> consumeInventoryValue({
@@ -908,6 +1119,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
         quantity,
         current.averageCost,
         false,
+        productId: current.productId,
+        variantId: current.variantId,
+        identityKind: current.identityKind,
+        unitId: current.unitId,
       ),
     );
   }
@@ -1075,6 +1290,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     required String itemId,
     required String itemType,
     required double quantity,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind? identityKind,
+    String? unitId,
   }) async {
     final rows = await executor.query(
       'inventory_valuations',
@@ -1092,6 +1311,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       quantity,
       current.averageCost,
       false,
+      productId: productId ?? current.productId,
+      variantId: variantId ?? current.variantId,
+      identityKind: identityKind ?? current.identityKind,
+      unitId: unitId ?? current.unitId,
     );
   }
 
@@ -1101,6 +1324,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     required String itemId,
     required String itemType,
     required double difference,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind? identityKind,
+    String? unitId,
   }) async {
     final rows = await executor.query(
       'inventory_valuations',
@@ -1119,6 +1346,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
         difference,
         current.averageCost,
         true,
+        productId: productId ?? current.productId,
+        variantId: variantId ?? current.variantId,
+        identityKind: identityKind ?? current.identityKind,
+        unitId: unitId ?? current.unitId,
       );
     }
     return _changeValuation(
@@ -1129,6 +1360,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       difference.abs(),
       current.averageCost,
       false,
+      productId: productId ?? current.productId,
+      variantId: variantId ?? current.variantId,
+      identityKind: identityKind ?? current.identityKind,
+      unitId: unitId ?? current.unitId,
     );
   }
 
@@ -1237,6 +1472,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       itemType: result.itemType,
       quantity: result.quantity,
       unitCost: result.totalCost / result.quantity,
+      productId: result.productId ?? result.itemId,
+      variantId: result.variantId,
+      identityKind: result.identityKind,
+      unitId: result.unitId,
     );
     return postJournalWithinTransaction(
       executor: executor,
@@ -1258,10 +1497,36 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     String itemType,
     double quantity,
     double unitCost,
-    bool receive,
-  ) async {
-    if (quantity <= 0 || unitCost < 0)
+    bool receive, {
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+    String? unitId,
+  }) async {
+    if (!quantity.isFinite ||
+        quantity <= 0 ||
+        !unitCost.isFinite ||
+        unitCost < 0)
       throw Exception('قيمة المخزون غير صالحة');
+    if (!receive) {
+      final warehouseRows = await executor.query(
+        'warehouses',
+        columns: ['purpose'],
+        where: 'id = ?',
+        whereArgs: [warehouseId],
+        limit: 1,
+      );
+      if (warehouseRows.isEmpty) throw Exception('المخزن غير موجود');
+      final purpose = WarehousePurpose.fromStorage(
+        warehouseRows.single['purpose'],
+      );
+      if (purpose != WarehousePurpose.sellable) {
+        throw Exception('لا يمكن استهلاك التقييم من مخزن ${purpose.value}');
+      }
+    }
+    if (identityKind == InventoryIdentityKind.legacyUnassigned) {
+      throw Exception('لا يمكن ترحيل المخزون القديم غير المخصص');
+    }
     final rows = await executor.query(
       'inventory_valuations',
       where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
@@ -1274,6 +1539,19 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     final oldCost = rows.isEmpty
         ? 0.0
         : (rows.first['averageCost'] as num).toDouble();
+    if (rows.isNotEmpty) {
+      final current = _valuation(rows.single);
+      if (current.identityKind != identityKind ||
+          current.productId != productId &&
+              current.productId != null &&
+              productId != null ||
+          current.variantId != variantId ||
+          current.unitId != unitId &&
+              current.unitId != null &&
+              unitId != null) {
+        throw Exception('هوية ووحدة تقييم المخزون غير متوافقتين');
+      }
+    }
     final newQuantity = receive
         ? oldQuantity + quantity
         : oldQuantity - quantity;
@@ -1285,6 +1563,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     final values = {
       'quantity': math.max(0, newQuantity),
       'averageCost': newCost,
+      'productId': productId ?? (itemType == 'PRODUCT' ? itemId : null),
+      'variantId': variantId,
+      'inventoryIdentityKind': identityKind.value,
+      'unitId': unitId,
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     };
     if (rows.isEmpty)
@@ -1308,6 +1590,10 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
       itemType: itemType,
       quantity: math.max(0, newQuantity),
       averageCost: newCost,
+      productId: productId ?? (itemType == 'PRODUCT' ? itemId : null),
+      variantId: variantId,
+      identityKind: identityKind,
+      unitId: unitId,
     );
   }
 
@@ -1490,6 +1776,12 @@ class AccountingLocalDataSource implements ProductionCostingAccountingSink {
     itemType: row['itemType'] as String,
     quantity: (row['quantity'] as num).toDouble(),
     averageCost: (row['averageCost'] as num).toDouble(),
+    productId: row['productId'] as String?,
+    variantId: row['variantId'] as String?,
+    identityKind: InventoryIdentityKindValue.parse(
+      row['inventoryIdentityKind'],
+    ),
+    unitId: row['unitId'] as String?,
   );
   String _accountTypeValue(AccountType value) => value.name.toUpperCase();
   AccountType _accountType(String value) =>

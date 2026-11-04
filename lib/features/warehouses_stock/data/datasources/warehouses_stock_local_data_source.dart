@@ -1,6 +1,7 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 import 'package:furnexa/features/accounting/data/datasources/accounting_local_data_source.dart';
@@ -49,6 +50,17 @@ class WarehousesStockLocalDataSource {
       where: 'active = 1',
       orderBy: 'name ASC',
     );
+    final variants = await db.query(
+      'product_variants',
+      where: 'active = 1',
+      orderBy: 'name ASC',
+    );
+    final variantsByProduct = <String, List<Map<String, Object?>>>{};
+    for (final variant in variants) {
+      variantsByProduct
+          .putIfAbsent(variant['productId'] as String, () => [])
+          .add(variant);
+    }
     return [
       ...raw.map(
         (row) => StockItemOption(
@@ -60,16 +72,31 @@ class WarehousesStockLocalDataSource {
           active: true,
         ),
       ),
-      ...products.map(
-        (row) => StockItemOption(
-          id: row['id'] as String,
-          name: row['name'] as String,
-          code: row['code'] as String,
-          unitId: row['unitId'] as String,
-          type: StockItemType.product,
-          active: true,
-        ),
-      ),
+      for (final row in products)
+        if (variantsByProduct[row['id']] case final productVariants?
+            when productVariants.isNotEmpty)
+          for (final variant in productVariants)
+            StockItemOption(
+              id: row['id'] as String,
+              productId: row['id'] as String,
+              variantId: variant['id'] as String,
+              name: '${row['name']} • ${variant['name']}',
+              code: '${row['code']} / ${variant['code']}',
+              unitId: row['unitId'] as String,
+              type: StockItemType.product,
+              active: true,
+              identityKind: InventoryIdentityKind.variant,
+            )
+        else
+          StockItemOption(
+            id: row['id'] as String,
+            productId: row['id'] as String,
+            name: row['name'] as String,
+            code: row['code'] as String,
+            unitId: row['unitId'] as String,
+            type: StockItemType.product,
+            active: true,
+          ),
     ];
   }
 
@@ -86,12 +113,21 @@ class WarehousesStockLocalDataSource {
     final rows = warehouseId == null
         ? await db.query(
             'stock_balances',
-            columns: ['itemId', 'itemType', 'SUM(quantity) AS quantity'],
+            columns: [
+              'itemId',
+              'itemType',
+              'productId',
+              'variantId',
+              'inventoryIdentityKind',
+              'unitId',
+              'SUM(quantity) AS quantity',
+            ],
             where: itemType == null
                 ? 'quantity > 0'
                 : 'quantity > 0 AND itemType = ?',
             whereArgs: itemType == null ? const [] : [itemType.value],
-            groupBy: 'itemId, itemType',
+            groupBy:
+                'itemId, itemType, productId, variantId, inventoryIdentityKind, unitId',
             orderBy: 'itemId ASC',
           )
         : await db.query(
@@ -101,6 +137,10 @@ class WarehousesStockLocalDataSource {
               'warehouseId',
               'itemId',
               'itemType',
+              'productId',
+              'variantId',
+              'inventoryIdentityKind',
+              'unitId',
               'quantity',
               'createdAt',
               'updatedAt',
@@ -123,9 +163,26 @@ class WarehousesStockLocalDataSource {
       final type = row['itemType'] == 'PRODUCT'
           ? StockItemType.product
           : StockItemType.rawMaterial;
-      final item = items
-          .where((value) => value.id == itemId && value.type == type)
-          .firstOrNull;
+      final identityKind = InventoryIdentityKindValue.parse(
+        row['inventoryIdentityKind'],
+      );
+      final productId = row['productId'] as String?;
+      final variantId = row['variantId'] as String?;
+      final item = identityKind == InventoryIdentityKind.legacyUnassigned
+          ? await _legacyItem(
+              db,
+              productId ?? itemId,
+              type,
+              row['unitId'] as String?,
+            )
+          : items
+                .where(
+                  (value) =>
+                      value.inventoryId == itemId &&
+                      value.type == type &&
+                      value.variantId == variantId,
+                )
+                .firstOrNull;
       if (item == null) continue;
       catalogMatches++;
       if (!item.active) inactiveCatalogMatches++;
@@ -145,15 +202,20 @@ class WarehousesStockLocalDataSource {
         quantity: quantity,
         createdAt: DateTime.fromMillisecondsSinceEpoch(0),
         updatedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        productId: productId,
+        variantId: variantId,
+        identityKind: identityKind,
+        unitId: row['unitId'] as String?,
       );
-      final unit = units
-          .where((value) => value['id'] == item.unitId)
-          .firstOrNull;
+      final unitId = row['unitId'] as String? ?? item.unitId;
+      final unit = units.where((value) => value['id'] == unitId).firstOrNull;
       stockLines.add(
         StockLine(
           balance: balance,
           item: item,
-          unitName: unit?['name'] as String? ?? '-',
+          unitName: identityKind == InventoryIdentityKind.legacyUnassigned
+              ? 'غير مخصص'
+              : unit?['name'] as String? ?? '-',
         ),
       );
     }
@@ -178,12 +240,20 @@ class WarehousesStockLocalDataSource {
   Future<List<StockLedgerLine>> ledger(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  ) async {
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  }) async {
+    final storageId = inventoryItemKey(
+      productId: itemId,
+      type: itemType,
+      variantId: variantId,
+      identityKind: identityKind,
+    );
     final rows = await (await _db).query(
       'stock_transactions',
       where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, itemId, itemType.value],
+      whereArgs: [warehouseId, storageId, itemType.value],
       orderBy: 'transactionDate ASC, createdAt ASC, id ASC',
     );
     var running = 0.0;
@@ -196,13 +266,21 @@ class WarehousesStockLocalDataSource {
   Future<double> balance(
     String warehouseId,
     String itemId,
-    StockItemType itemType,
-  ) async {
+    StockItemType itemType, {
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+  }) async {
+    final storageId = inventoryItemKey(
+      productId: itemId,
+      type: itemType,
+      variantId: variantId,
+      identityKind: identityKind,
+    );
     final row = await (await _db).query(
       'stock_balances',
       columns: ['quantity'],
       where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, itemId, itemType.value],
+      whereArgs: [warehouseId, storageId, itemType.value],
       limit: 1,
     );
     return row.isEmpty ? 0 : (row.first['quantity'] as num).toDouble();
@@ -236,8 +314,11 @@ class WarehousesStockLocalDataSource {
     );
     await NotificationsLocalDataSource().evaluateStock(
       warehouseId: warehouseId,
-      itemId: item.id,
+      itemId: item.inventoryId,
       itemType: item.type.value,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
     );
   }
 
@@ -297,8 +378,11 @@ class WarehousesStockLocalDataSource {
     );
     await NotificationsLocalDataSource().evaluateStock(
       warehouseId: warehouseId,
-      itemId: item.id,
+      itemId: item.inventoryId,
       itemType: item.type.value,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
     );
   }
 
@@ -313,6 +397,7 @@ class WarehousesStockLocalDataSource {
   }) async {
     _positive(quantity);
     await _validateWarehouse(executor, warehouseId);
+    await _requireSellableWarehouse(executor, warehouseId);
     await _validateItem(executor, item);
     final current = await _getBalance(executor, warehouseId, item);
     if (current < quantity) {
@@ -348,6 +433,9 @@ class WarehousesStockLocalDataSource {
     final db = await _db;
     await db.transaction((txn) async {
       await _validateWarehouse(txn, warehouseId);
+      if (type == StockTransactionType.stockOut) {
+        await _requireSellableWarehouse(txn, warehouseId);
+      }
       await _validateItem(txn, item);
       if (operationId != null &&
           await _operationExists(txn, operationId.trim())) {
@@ -406,6 +494,8 @@ class WarehousesStockLocalDataSource {
     await db.transaction((txn) async {
       await _validateWarehouse(txn, sourceWarehouseId);
       await _validateWarehouse(txn, destinationWarehouseId);
+      await _requireSellableWarehouse(txn, sourceWarehouseId);
+      await _requireSellableWarehouse(txn, destinationWarehouseId);
       await _validateItem(txn, item);
       if (operationId != null &&
           await _operationExists(txn, operationId.trim())) {
@@ -419,7 +509,7 @@ class WarehousesStockLocalDataSource {
       final valuation = await _accounting.valuationWithinTransaction(
         txn,
         sourceWarehouseId,
-        item.id,
+        item.inventoryId,
         item.type.value,
       );
       await _writeBalance(txn, sourceWarehouseId, item, current - quantity);
@@ -456,17 +546,25 @@ class WarehousesStockLocalDataSource {
         await _accounting.consumeInventoryValueWithinTransaction(
           executor: txn,
           warehouseId: sourceWarehouseId,
-          itemId: item.id,
+          itemId: item.inventoryId,
           itemType: item.type.value,
           quantity: quantity,
+          productId: item.baseProductId,
+          variantId: item.variantId,
+          identityKind: item.identityKind,
+          unitId: item.unitId,
         );
         await _accounting.receiveInventoryValueWithinTransaction(
           executor: txn,
           warehouseId: destinationWarehouseId,
-          itemId: item.id,
+          itemId: item.inventoryId,
           itemType: item.type.value,
           quantity: quantity,
           unitCost: valuation.averageCost,
+          productId: item.baseProductId,
+          variantId: item.variantId,
+          identityKind: item.identityKind,
+          unitId: item.unitId,
         );
         await _accounting.postInventoryTransferWithinTransaction(
           executor: txn,
@@ -484,13 +582,19 @@ class WarehousesStockLocalDataSource {
     );
     await NotificationsLocalDataSource().evaluateStock(
       warehouseId: sourceWarehouseId,
-      itemId: item.id,
+      itemId: item.inventoryId,
       itemType: item.type.value,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
     );
     await NotificationsLocalDataSource().evaluateStock(
       warehouseId: destinationWarehouseId,
-      itemId: item.id,
+      itemId: item.inventoryId,
       itemType: item.type.value,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
     );
   }
 
@@ -509,6 +613,7 @@ class WarehousesStockLocalDataSource {
     final db = await _db;
     await db.transaction((txn) async {
       await _validateWarehouse(txn, warehouseId);
+      await _requireSellableWarehouse(txn, warehouseId);
       await _validateItem(txn, item);
       if (operationId != null &&
           await _operationExists(txn, operationId.trim())) {
@@ -521,7 +626,7 @@ class WarehousesStockLocalDataSource {
       final valuation = await _accounting.valuationWithinTransaction(
         txn,
         warehouseId,
-        item.id,
+        item.inventoryId,
         item.type.value,
       );
       await _writeBalance(txn, warehouseId, item, next);
@@ -541,9 +646,13 @@ class WarehousesStockLocalDataSource {
         await _accounting.adjustInventoryValueWithinTransaction(
           executor: txn,
           warehouseId: warehouseId,
-          itemId: item.id,
+          itemId: item.inventoryId,
           itemType: item.type.value,
           difference: difference,
+          productId: item.baseProductId,
+          variantId: item.variantId,
+          identityKind: item.identityKind,
+          unitId: item.unitId,
         );
         await _accounting.postInventoryAdjustmentWithinTransaction(
           executor: txn,
@@ -560,8 +669,11 @@ class WarehousesStockLocalDataSource {
     );
     await NotificationsLocalDataSource().evaluateStock(
       warehouseId: warehouseId,
-      itemId: item.id,
+      itemId: item.inventoryId,
       itemType: item.type.value,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
       adjustment: true,
     );
   }
@@ -569,6 +681,13 @@ class WarehousesStockLocalDataSource {
   Future<List<StockItemOption>> _allItems(DatabaseExecutor db) async {
     final raw = await db.query('raw_materials');
     final products = await db.query('products');
+    final variants = await db.query('product_variants');
+    final variantsByProduct = <String, List<Map<String, Object?>>>{};
+    for (final variant in variants) {
+      variantsByProduct
+          .putIfAbsent(variant['productId'] as String, () => [])
+          .add(variant);
+    }
     return [
       ...raw.map(
         (row) => StockItemOption(
@@ -580,17 +699,73 @@ class WarehousesStockLocalDataSource {
           active: row['active'] == 1,
         ),
       ),
-      ...products.map(
-        (row) => StockItemOption(
-          id: row['id'] as String,
-          name: row['name'] as String,
-          code: row['code'] as String,
-          unitId: row['unitId'] as String,
-          type: StockItemType.product,
-          active: row['active'] == 1,
-        ),
-      ),
+      for (final row in products)
+        if (variantsByProduct[row['id']] case final productVariants?
+            when productVariants.isNotEmpty)
+          for (final variant in productVariants)
+            StockItemOption(
+              id: row['id'] as String,
+              productId: row['id'] as String,
+              variantId: variant['id'] as String,
+              name: '${row['name']} • ${variant['name']}',
+              code: '${row['code']} / ${variant['code']}',
+              unitId: row['unitId'] as String,
+              type: StockItemType.product,
+              active: row['active'] == 1 && variant['active'] == 1,
+              identityKind: InventoryIdentityKind.variant,
+            )
+        else
+          StockItemOption(
+            id: row['id'] as String,
+            productId: row['id'] as String,
+            name: row['name'] as String,
+            code: row['code'] as String,
+            unitId: row['unitId'] as String,
+            type: StockItemType.product,
+            active: row['active'] == 1,
+          ),
     ];
+  }
+
+  Future<StockItemOption> _legacyItem(
+    DatabaseExecutor db,
+    String productId,
+    StockItemType type,
+    String? unitId,
+  ) async {
+    final table = type == StockItemType.rawMaterial
+        ? 'raw_materials'
+        : 'products';
+    final rows = await db.query(
+      table,
+      columns: ['id', 'name', 'code', 'unitId', 'active'],
+      where: 'id = ?',
+      whereArgs: [productId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return StockItemOption(
+        id: productId,
+        productId: productId,
+        name: 'مخزون قديم غير مخصص',
+        code: productId,
+        unitId: unitId ?? '',
+        type: type,
+        active: false,
+        identityKind: InventoryIdentityKind.legacyUnassigned,
+      );
+    }
+    final row = rows.single;
+    return StockItemOption(
+      id: productId,
+      productId: productId,
+      name: '${row['name']} • مخزون قديم غير مخصص',
+      code: row['code'] as String,
+      unitId: unitId ?? row['unitId'] as String,
+      type: type,
+      active: false,
+      identityKind: InventoryIdentityKind.legacyUnassigned,
+    );
   }
 
   Future<void> _validateWarehouse(DatabaseExecutor db, String id) async {
@@ -604,7 +779,25 @@ class WarehousesStockLocalDataSource {
     if (rows.isEmpty) throw Exception('المخزن غير موجود أو غير نشط');
   }
 
+  Future<void> _requireSellableWarehouse(DatabaseExecutor db, String id) async {
+    final rows = await db.query(
+      'warehouses',
+      columns: ['purpose'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw Exception('المخزن غير موجود');
+    final purpose = WarehousePurpose.fromStorage(rows.single['purpose']);
+    if (purpose != WarehousePurpose.sellable) {
+      throw Exception('لا يمكن استهلاك المخزون من مخزن ${purpose.value}');
+    }
+  }
+
   Future<void> _validateItem(DatabaseExecutor db, StockItemOption item) async {
+    if (item.identityKind == InventoryIdentityKind.legacyUnassigned) {
+      throw Exception('لا يمكن استخدام المخزون القديم غير المخصص');
+    }
     final table = item.type == StockItemType.rawMaterial
         ? 'raw_materials'
         : 'products';
@@ -612,12 +805,53 @@ class WarehousesStockLocalDataSource {
       table,
       columns: ['id', 'unitId'],
       where: 'id = ? AND active = 1',
-      whereArgs: [item.id],
+      whereArgs: [item.baseProductId],
       limit: 1,
     );
     if (rows.isEmpty) throw Exception('الصنف غير موجود أو غير نشط');
     if (rows.first['unitId'] != item.unitId) {
       throw Exception('وحدة الصنف غير متوافقة');
+    }
+    if ((await db.query(
+      'units',
+      columns: ['id'],
+      where: 'id = ? AND active = 1',
+      whereArgs: [item.unitId],
+      limit: 1,
+    )).isEmpty) {
+      throw Exception('الوحدة الأساسية غير موجودة أو غير نشطة');
+    }
+    if (item.type == StockItemType.product) {
+      final variants = await db.query(
+        'product_variants',
+        columns: ['id'],
+        where: 'productId = ?',
+        whereArgs: [item.baseProductId],
+        limit: 1,
+      );
+      if (item.variantId == null && variants.isNotEmpty) {
+        throw Exception('يجب تحديد متغير المنتج للمخزون');
+      }
+      if (item.variantId != null &&
+          (await db.query(
+            'product_variants',
+            columns: ['id'],
+            where: 'id = ? AND productId = ? AND active = 1',
+            whereArgs: [item.variantId, item.baseProductId],
+            limit: 1,
+          )).isEmpty) {
+        throw Exception('متغير المنتج غير موجود أو غير نشط');
+      }
+      if (item.variantId != null &&
+          (await db.query(
+            'products',
+            columns: ['id'],
+            where: 'id = ?',
+            whereArgs: [item.inventoryId],
+            limit: 1,
+          )).isNotEmpty) {
+        throw Exception('معرف مخزون المتغير يتعارض مع معرف منتج');
+      }
     }
   }
 
@@ -630,7 +864,7 @@ class WarehousesStockLocalDataSource {
       'stock_balances',
       columns: ['quantity'],
       where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, item.id, item.type.value],
+      whereArgs: [warehouseId, item.inventoryId, item.type.value],
       limit: 1,
     );
     return rows.isEmpty ? 0 : (rows.first['quantity'] as num).toDouble();
@@ -647,15 +881,22 @@ class WarehousesStockLocalDataSource {
       'stock_balances',
       columns: ['id'],
       where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, item.id, item.type.value],
+      whereArgs: [warehouseId, item.inventoryId, item.type.value],
       limit: 1,
     );
-    final values = <String, Object?>{'quantity': quantity, 'updatedAt': now};
+    final values = <String, Object?>{
+      'quantity': quantity,
+      'updatedAt': now,
+      'productId': item.baseProductId,
+      'variantId': item.variantId,
+      'inventoryIdentityKind': item.identityKind.value,
+      'unitId': item.unitId,
+    };
     if (rows.isEmpty) {
       values.addAll({
         'id': _id('balance'),
         'warehouseId': warehouseId,
-        'itemId': item.id,
+        'itemId': item.inventoryId,
         'itemType': item.type.value,
         'createdAt': now,
       });
@@ -684,8 +925,11 @@ class WarehousesStockLocalDataSource {
     await db.insert('stock_transactions', {
       'id': _id('transaction'),
       'warehouseId': warehouseId,
-      'itemId': item.id,
+      'itemId': item.inventoryId,
       'itemType': item.type.value,
+      'productId': item.baseProductId,
+      'variantId': item.variantId,
+      'inventoryIdentityKind': item.identityKind.value,
       'transactionType': type.value,
       'quantity': quantity,
       'unitId': item.unitId,

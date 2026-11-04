@@ -231,6 +231,10 @@ void main() {
       'warehouseId': warehouseId,
       'itemId': productId,
       'itemType': 'PRODUCT',
+      'productId': productId,
+      'variantId': null,
+      'inventoryIdentityKind': 'BASE',
+      'unitId': unitId,
       'quantity': 10,
       'averageCost': 15,
       'updatedAt': stamp,
@@ -293,13 +297,41 @@ void main() {
     await DatabaseTestHelper.reset();
   });
 
+  Future<ProductionOrder> completeProductionOrder() async {
+    await production.saveRoute(productId, [stageId]);
+    final order = await production.createOrder(
+      productId: productId,
+      plannedQuantity: 5,
+    );
+    await production.planOrder(order.id);
+    await production.startOrder(order.id);
+    await production.startStage(order.stages.first.id);
+    await production.completeStage(order.stages.first.id);
+    await production.consumeMaterial(
+      orderId: order.id,
+      rawMaterialId: materialId,
+      warehouseId: warehouseId,
+      quantity: 10,
+      date: now,
+      operationId: 'system-production-consumption-$suffix',
+    );
+    await production.recordOutput(
+      orderId: order.id,
+      warehouseId: warehouseId,
+      quantity: 5,
+      date: now,
+      operationId: 'system-production-output-$suffix',
+    );
+    return order;
+  }
+
   test('1. purchasing receipt updates stock and valuation', () async {
     final order = PurchaseOrder(
       id: 'po-$suffix',
       orderNumber: 'PO-$suffix',
       supplierId: supplierId,
       orderDate: now,
-      status: PurchaseOrderStatus.confirmed,
+      status: PurchaseOrderStatus.approved,
       subtotal: 200,
       discount: 0,
       tax: 0,
@@ -323,6 +355,7 @@ void main() {
       order: order,
       warehouseId: warehouseId,
       receiptDate: now,
+      operationId: 'system-integration-receipt-$suffix',
       items: [
         PurchasingItem(
           id: 'po-item-$suffix',
@@ -380,6 +413,7 @@ void main() {
     await sales.saveOrder(order);
     await sales.postDelivery(
       order: order,
+      operationId: 'sales-integration-$suffix',
       warehouseId: warehouseId,
       deliveryDate: now,
       items: [
@@ -406,28 +440,7 @@ void main() {
   test(
     '3. production route and output complete the manufacturing loop',
     () async {
-      await production.saveRoute(productId, [stageId]);
-      final order = await production.createOrder(
-        productId: productId,
-        plannedQuantity: 5,
-      );
-      await production.planOrder(order.id);
-      await production.startOrder(order.id);
-      await production.startStage(order.stages.first.id);
-      await production.completeStage(order.stages.first.id);
-      await production.consumeMaterial(
-        orderId: order.id,
-        rawMaterialId: materialId,
-        warehouseId: warehouseId,
-        quantity: 8,
-        date: now,
-      );
-      await production.recordOutput(
-        orderId: order.id,
-        warehouseId: warehouseId,
-        quantity: 5,
-        date: now,
-      );
+      final order = await completeProductionOrder();
 
       final updated = await production.getOrder(order.id);
       expect(updated.status, ProductionOrderStatus.completed);
@@ -438,24 +451,25 @@ void main() {
         whereArgs: [warehouseId, materialId],
         limit: 1,
       );
-      expect((materialRows.single['quantity'] as num).toDouble(), 12);
+      expect((materialRows.single['quantity'] as num).toDouble(), 10);
       final materialValuation = await accounting.valuation(
         warehouseId,
         materialId,
         'RAW_MATERIAL',
       );
       expect(materialValuation, isNotNull);
-      expect(materialValuation!.quantity, 12);
+      expect(materialValuation!.quantity, 10);
       expect(materialValuation.averageCost, 10);
 
       final batch = await costing.calculateBatchCost(
         productionOrderId: order.id,
       );
-      expect(batch.materialCost, 80);
+      expect(batch.materialCost, 100);
       expect(batch.goodFinishedQuantity, 5);
       final finalized = await costing.finalizeBatchCost(order.id, 'admin');
       expect(finalized.status.name, 'finalized');
-      expect(finalized.actualUnitCost, 16);
+      expect(finalized.totalCost, 100);
+      expect(finalized.actualUnitCost, 20);
 
       final finishedRows = await db.query(
         'stock_balances',
@@ -473,7 +487,200 @@ void main() {
       expect(finishedValuation!.quantity, 15);
       expect(
         finishedValuation.quantity * finishedValuation.averageCost,
-        closeTo(230, 0.000001),
+        closeTo(250, 0.000001),
+      );
+
+      final referenceId = '${order.id}:$warehouseId';
+      final journalRows = await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['PRODUCTION_COST', referenceId],
+      );
+      expect(journalRows, hasLength(1));
+      final journal = journalRows.single;
+      expect(journal['status'], 'POSTED');
+      final persistedLines = await db.rawQuery(
+        '''
+        SELECT jl.accountId, a.code AS accountCode, jl.debit, jl.credit
+        FROM journal_lines jl
+        JOIN accounts a ON a.id = jl.accountId
+        WHERE jl.journalEntryId = ?
+        ORDER BY jl.rowid ASC
+        ''',
+        [journal['id']],
+      );
+      expect(persistedLines, hasLength(2));
+      final inventoryLine = persistedLines.singleWhere(
+        (line) => line['accountCode'] == '1100',
+      );
+      final productionLine = persistedLines.singleWhere(
+        (line) => line['accountCode'] == '5900',
+      );
+      expect((inventoryLine['debit'] as num).toDouble(), finalized.totalCost);
+      expect((inventoryLine['credit'] as num).toDouble(), 0);
+      expect((productionLine['debit'] as num).toDouble(), 0);
+      expect((productionLine['credit'] as num).toDouble(), finalized.totalCost);
+      final totalDebits = persistedLines.fold<double>(
+        0,
+        (sum, line) => sum + (line['debit'] as num).toDouble(),
+      );
+      final totalCredits = persistedLines.fold<double>(
+        0,
+        (sum, line) => sum + (line['credit'] as num).toDouble(),
+      );
+      expect(totalDebits, finalized.totalCost);
+      expect(totalCredits, finalized.totalCost);
+      expect(totalDebits, totalCredits);
+
+      final batchBeforeRetry = await db.query(
+        'production_batch_costs',
+        where: 'productionOrderId = ?',
+        whereArgs: [order.id],
+      );
+      final journalLinesBeforeRetry = await db.query(
+        'journal_lines',
+        where: 'journalEntryId = ?',
+        whereArgs: [journal['id']],
+        orderBy: 'rowid ASC',
+      );
+      expect(journalLinesBeforeRetry, hasLength(2));
+      final valuationBeforeRetry = await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      );
+      expect(valuationBeforeRetry, hasLength(1));
+      await expectLater(
+        costing.finalizeBatchCost(order.id, 'admin'),
+        throwsException,
+      );
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ? AND referenceId = ?',
+          whereArgs: ['PRODUCTION_COST', referenceId],
+        ),
+        equals(journalRows),
+      );
+      expect(
+        await db.query(
+          'journal_lines',
+          where: 'journalEntryId = ?',
+          whereArgs: [journal['id']],
+          orderBy: 'rowid ASC',
+        ),
+        equals(journalLinesBeforeRetry),
+      );
+      expect(
+        await db.query(
+          'inventory_valuations',
+          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+          whereArgs: [warehouseId, productId, 'PRODUCT'],
+        ),
+        equals(valuationBeforeRetry),
+      );
+      expect(
+        await db.query(
+          'production_batch_costs',
+          where: 'productionOrderId = ?',
+          whereArgs: [order.id],
+        ),
+        equals(batchBeforeRetry),
+      );
+    },
+  );
+
+  test(
+    'production cost finalization rolls back when journal insertion fails',
+    () async {
+      final order = await completeProductionOrder();
+      final batch = await costing.calculateBatchCost(
+        productionOrderId: order.id,
+      );
+      final referenceId = '${order.id}:$warehouseId';
+      final valuationBefore = await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      );
+      final batchBefore = await db.query(
+        'production_batch_costs',
+        where: 'productionOrderId = ?',
+        whereArgs: [order.id],
+      );
+      final stockBefore = await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      );
+      expect(batch.status.name, 'calculated');
+
+      await db.execute('''
+      CREATE TRIGGER fail_production_cost_journal_insert
+      BEFORE INSERT ON journal_entries
+      WHEN NEW.referenceType = 'PRODUCTION_COST'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected production costing failure');
+      END
+    ''');
+      try {
+        await expectLater(
+          costing.finalizeBatchCost(order.id, 'admin'),
+          throwsA(
+            predicate(
+              (error) => error.toString().contains(
+                'injected production costing failure',
+              ),
+            ),
+          ),
+        );
+      } finally {
+        await db.execute(
+          'DROP TRIGGER IF EXISTS fail_production_cost_journal_insert',
+        );
+      }
+
+      expect(
+        await db.query(
+          'inventory_valuations',
+          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+          whereArgs: [warehouseId, productId, 'PRODUCT'],
+        ),
+        equals(valuationBefore),
+      );
+      final failedJournals = await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['PRODUCTION_COST', referenceId],
+      );
+      expect(failedJournals, isEmpty);
+      expect(
+        await db.rawQuery(
+          '''
+        SELECT jl.id
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.id = jl.journalEntryId
+        WHERE je.referenceType = ? AND je.referenceId = ?
+        ''',
+          ['PRODUCTION_COST', referenceId],
+        ),
+        isEmpty,
+      );
+      expect(
+        await db.query(
+          'production_batch_costs',
+          where: 'productionOrderId = ?',
+          whereArgs: [order.id],
+        ),
+        equals(batchBefore),
+      );
+      expect(
+        await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+          whereArgs: [warehouseId, productId, 'PRODUCT'],
+        ),
+        equals(stockBefore),
       );
     },
   );
@@ -536,6 +743,7 @@ void main() {
       await sales.saveOrder(salesOrder);
       await sales.postDelivery(
         order: salesOrder,
+        operationId: 'sales-return-source-$suffix',
         warehouseId: warehouseId,
         deliveryDate: now,
         items: [

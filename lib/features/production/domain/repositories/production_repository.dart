@@ -9,14 +9,19 @@ abstract class ProductionRepository {
   Future<List<ProductVariant>> activeVariants(String productId);
   Future<List<ProductionStage>> activeStages();
   Future<List<Warehouse>> activeWarehouses();
+  Future<List<Warehouse>> accessibleProductionWarehouses();
+  Future<List<Warehouse>> outputWarehouses(String orderId);
   Future<List<ProductionRoute>> routes();
   Future<ProductionRoute?> routeForProduct(String productId);
+  Future<bool> productBomIsValid(String productId);
+  Future<bool> orderBomIsValid(String orderId);
   Future<void> saveRoute(String productId, List<String> stageIds);
   Future<List<ProductionOrder>> orders([String query = '']);
   Future<ProductionOrder> getOrder(String id);
   Future<ProductionOrder> createOrder({
     required String productId,
     String? variantId,
+    String? expectedUnitId,
     required double plannedQuantity,
     String? notes,
   });
@@ -36,6 +41,7 @@ abstract class ProductionRepository {
     required String warehouseId,
     required double quantity,
     required DateTime date,
+    required String operationId,
     String? notes,
   });
   Future<void> recordWaste({
@@ -52,6 +58,7 @@ abstract class ProductionRepository {
     required String warehouseId,
     required double quantity,
     required DateTime date,
+    required String operationId,
     String? notes,
   });
   Future<List<StockItemOption>> activeRawMaterials();

@@ -135,7 +135,11 @@ class FurnexaDatabase {
     await migrate(db, oldVersion, newVersion);
   }
 
-  Future<void> migrate(Database db, int oldVersion, int newVersion) async {
+  Future<void> migrate(
+    DatabaseExecutor db,
+    int oldVersion,
+    int newVersion,
+  ) async {
     if (oldVersion < newVersion) {
       for (var version = oldVersion + 1; version <= newVersion; version++) {
         await _runMigration(db, version);
@@ -143,7 +147,7 @@ class FurnexaDatabase {
     }
   }
 
-  Future<void> _runMigration(Database db, int version) async {
+  Future<void> _runMigration(DatabaseExecutor db, int version) async {
     switch (version) {
       case 1:
         await db.execute('PRAGMA user_version = 1');
@@ -449,11 +453,13 @@ class FurnexaDatabase {
             id TEXT PRIMARY KEY,
             requestNumber TEXT NOT NULL UNIQUE,
             requestDate INTEGER NOT NULL,
+            supplierId TEXT NOT NULL,
             requestedBy TEXT NOT NULL,
             notes TEXT,
             status TEXT NOT NULL CHECK(status IN ('DRAFT','PENDING','APPROVED','REJECTED','CONVERTED','CANCELLED')),
             createdAt INTEGER NOT NULL,
-            updatedAt INTEGER NOT NULL
+            updatedAt INTEGER NOT NULL,
+            FOREIGN KEY (supplierId) REFERENCES suppliers(id) ON DELETE RESTRICT
           )
         ''');
         await db.execute('''
@@ -478,7 +484,7 @@ class FurnexaDatabase {
             purchaseRequestId TEXT,
             orderDate INTEGER NOT NULL,
             expectedDeliveryDate INTEGER,
-            status TEXT NOT NULL CHECK(status IN ('DRAFT','CONFIRMED','PARTIALLY_RECEIVED','FULLY_RECEIVED','CANCELLED')),
+            status TEXT NOT NULL CHECK(status IN ('DRAFT','APPROVED','CONFIRMED','PARTIALLY_RECEIVED','FULLY_RECEIVED','CANCELLED')),
             subtotal REAL NOT NULL DEFAULT 0,
             discount REAL NOT NULL DEFAULT 0,
             tax REAL NOT NULL DEFAULT 0,
@@ -2171,8 +2177,918 @@ class FurnexaDatabase {
         );
         await db.execute('PRAGMA user_version = 27');
         break;
+      case 28:
+        final requestColumns = await db.rawQuery(
+          'PRAGMA table_info(purchase_requests)',
+        );
+        if (requestColumns.isEmpty) {
+          throw StateError(
+            'Cannot migrate supplier linkage: purchase_requests table is missing',
+          );
+        }
+        if (!requestColumns.any((column) => column['name'] == 'supplierId')) {
+          await db.execute('''
+            ALTER TABLE purchase_requests
+            ADD COLUMN supplierId TEXT
+            REFERENCES suppliers(id) ON DELETE RESTRICT
+          ''');
+        }
+        await db.execute('''
+          CREATE TRIGGER IF NOT EXISTS trg_purchase_requests_supplier_insert
+          BEFORE INSERT ON purchase_requests
+          WHEN NEW.supplierId IS NULL OR TRIM(NEW.supplierId) = ''
+          BEGIN
+            SELECT RAISE(ABORT, 'Purchase request supplier is required');
+          END
+        ''');
+        await db.execute('''
+          CREATE TRIGGER IF NOT EXISTS trg_purchase_requests_supplier_update
+          BEFORE UPDATE OF supplierId ON purchase_requests
+          WHEN NEW.supplierId IS NULL OR TRIM(NEW.supplierId) = ''
+          BEGIN
+            SELECT RAISE(ABORT, 'Purchase request supplier is required');
+          END
+        ''');
+        await db.execute('PRAGMA user_version = 28');
+        break;
+      case 29:
+        final receiptColumns = await db.rawQuery(
+          'PRAGMA table_info(purchase_receipts)',
+        );
+        if (receiptColumns.isNotEmpty &&
+            !receiptColumns.any((column) => column['name'] == 'receivedBy')) {
+          await db.execute(
+            'ALTER TABLE purchase_receipts ADD COLUMN receivedBy TEXT',
+          );
+        }
+        await db.execute('PRAGMA user_version = 29');
+        break;
+      case 30:
+        const tables = [
+          'purchase_orders',
+          'purchase_order_items',
+          'purchase_receipts',
+          'purchase_receipt_items',
+          'purchase_returns',
+          'purchase_return_items',
+        ];
+        const expectedColumns = <String, List<String>>{
+          'purchase_orders': [
+            'id',
+            'orderNumber',
+            'supplierId',
+            'purchaseRequestId',
+            'orderDate',
+            'expectedDeliveryDate',
+            'status',
+            'subtotal',
+            'discount',
+            'tax',
+            'grandTotal',
+            'notes',
+            'createdAt',
+            'updatedAt',
+          ],
+          'purchase_order_items': [
+            'id',
+            'purchaseOrderId',
+            'itemId',
+            'itemType',
+            'quantity',
+            'unitId',
+            'unitPrice',
+            'discount',
+            'tax',
+            'lineTotal',
+            'receivedQuantity',
+            'notes',
+          ],
+          'purchase_receipts': [
+            'id',
+            'receiptNumber',
+            'purchaseOrderId',
+            'warehouseId',
+            'receiptDate',
+            'notes',
+            'createdAt',
+            'receivedBy',
+          ],
+          'purchase_receipt_items': [
+            'id',
+            'purchaseReceiptId',
+            'purchaseOrderItemId',
+            'receivedQuantity',
+            'unitId',
+            'notes',
+          ],
+          'purchase_returns': [
+            'id',
+            'returnNumber',
+            'purchaseOrderId',
+            'purchaseReceiptId',
+            'supplierId',
+            'warehouseId',
+            'returnDate',
+            'reason',
+            'status',
+            'notes',
+            'createdAt',
+            'updatedAt',
+          ],
+          'purchase_return_items': [
+            'id',
+            'purchaseReturnId',
+            'itemId',
+            'itemType',
+            'quantity',
+            'unitId',
+            'unitPrice',
+            'reason',
+            'qualityStatus',
+            'createdAt',
+          ],
+        };
+        final beforeCounts = <String, int>{};
+        for (final table in tables) {
+          final schema = await db.rawQuery(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [table],
+          );
+          if (schema.isEmpty) {
+            throw StateError('Cannot migrate missing table: $table');
+          }
+          final columns = await db.rawQuery('PRAGMA table_info("$table")');
+          final actualColumns = columns
+              .map((column) => column['name'] as String)
+              .toList();
+          if (actualColumns.length != expectedColumns[table]!.length ||
+              !actualColumns.toSet().containsAll(expectedColumns[table]!)) {
+            throw StateError(
+              'Unexpected $table columns; refusing a lossy status migration',
+            );
+          }
+          beforeCounts[table] =
+              (await db.rawQuery(
+                    'SELECT COUNT(*) AS count FROM "$table"',
+                  )).single['count']!
+                  as int;
+        }
+
+        final savedIndexes = await db.rawQuery('''
+          SELECT sql FROM sqlite_master
+          WHERE type = 'index' AND sql IS NOT NULL
+            AND tbl_name IN (${List.filled(tables.length, '?').join(',')})
+          ORDER BY name
+          ''', tables);
+        final savedTriggers = await db.rawQuery('''
+          SELECT sql FROM sqlite_master
+          WHERE type = 'trigger'
+            AND tbl_name IN (${List.filled(tables.length, '?').join(',')})
+          ORDER BY name
+          ''', tables);
+
+        await db.execute('''
+          CREATE TABLE purchase_orders__migration_30 (
+            id TEXT PRIMARY KEY,
+            orderNumber TEXT NOT NULL UNIQUE,
+            supplierId TEXT NOT NULL,
+            purchaseRequestId TEXT,
+            orderDate INTEGER NOT NULL,
+            expectedDeliveryDate INTEGER,
+            status TEXT NOT NULL CHECK(status IN ('DRAFT','APPROVED','PARTIALLY_RECEIVED','FULLY_RECEIVED','CANCELLED')),
+            subtotal REAL NOT NULL DEFAULT 0,
+            discount REAL NOT NULL DEFAULT 0,
+            tax REAL NOT NULL DEFAULT 0,
+            grandTotal REAL NOT NULL DEFAULT 0,
+            notes TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            FOREIGN KEY (supplierId) REFERENCES suppliers(id) ON DELETE RESTRICT,
+            FOREIGN KEY (purchaseRequestId) REFERENCES purchase_requests(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE purchase_order_items__migration_30 (
+            id TEXT PRIMARY KEY,
+            purchaseOrderId TEXT NOT NULL,
+            itemId TEXT NOT NULL,
+            itemType TEXT NOT NULL CHECK(itemType IN ('RAW_MATERIAL','PRODUCT')),
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            unitId TEXT NOT NULL,
+            unitPrice REAL NOT NULL CHECK(unitPrice >= 0),
+            discount REAL NOT NULL DEFAULT 0,
+            tax REAL NOT NULL DEFAULT 0,
+            lineTotal REAL NOT NULL DEFAULT 0,
+            receivedQuantity REAL NOT NULL DEFAULT 0 CHECK(receivedQuantity >= 0),
+            notes TEXT,
+            UNIQUE(purchaseOrderId, itemId, itemType),
+            FOREIGN KEY (purchaseOrderId) REFERENCES purchase_orders__migration_30(id) ON DELETE RESTRICT,
+            FOREIGN KEY (unitId) REFERENCES units(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE purchase_receipts__migration_30 (
+            id TEXT PRIMARY KEY,
+            receiptNumber TEXT NOT NULL UNIQUE,
+            purchaseOrderId TEXT NOT NULL,
+            warehouseId TEXT NOT NULL,
+            receiptDate INTEGER NOT NULL,
+            notes TEXT,
+            createdAt INTEGER NOT NULL,
+            receivedBy TEXT,
+            FOREIGN KEY (purchaseOrderId) REFERENCES purchase_orders__migration_30(id) ON DELETE RESTRICT,
+            FOREIGN KEY (warehouseId) REFERENCES warehouses(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE purchase_receipt_items__migration_30 (
+            id TEXT PRIMARY KEY,
+            purchaseReceiptId TEXT NOT NULL,
+            purchaseOrderItemId TEXT NOT NULL,
+            receivedQuantity REAL NOT NULL CHECK(receivedQuantity > 0),
+            unitId TEXT NOT NULL,
+            notes TEXT,
+            FOREIGN KEY (purchaseReceiptId) REFERENCES purchase_receipts__migration_30(id) ON DELETE RESTRICT,
+            FOREIGN KEY (purchaseOrderItemId) REFERENCES purchase_order_items__migration_30(id) ON DELETE RESTRICT,
+            FOREIGN KEY (unitId) REFERENCES units(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE purchase_returns__migration_30 (
+            id TEXT PRIMARY KEY,
+            returnNumber TEXT NOT NULL UNIQUE,
+            purchaseOrderId TEXT NOT NULL,
+            purchaseReceiptId TEXT,
+            supplierId TEXT NOT NULL,
+            warehouseId TEXT NOT NULL,
+            returnDate INTEGER NOT NULL,
+            reason TEXT,
+            status TEXT NOT NULL CHECK(status IN ('DRAFT', 'PENDING', 'APPROVED', 'REJECTED', 'COMPLETED', 'CANCELLED')) DEFAULT 'PENDING',
+            notes TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            FOREIGN KEY (purchaseOrderId) REFERENCES purchase_orders__migration_30(id) ON DELETE RESTRICT,
+            FOREIGN KEY (supplierId) REFERENCES suppliers(id) ON DELETE RESTRICT,
+            FOREIGN KEY (warehouseId) REFERENCES warehouses(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE purchase_return_items__migration_30 (
+            id TEXT PRIMARY KEY,
+            purchaseReturnId TEXT NOT NULL,
+            itemId TEXT NOT NULL,
+            itemType TEXT NOT NULL CHECK(itemType IN ('PRODUCT', 'RAW_MATERIAL')),
+            quantity REAL NOT NULL CHECK(quantity >= 0),
+            unitId TEXT NOT NULL,
+            unitPrice REAL NOT NULL DEFAULT 0,
+            reason TEXT,
+            qualityStatus TEXT NOT NULL CHECK(qualityStatus IN ('PENDING', 'APPROVED', 'REJECTED', 'QUARANTINED')) DEFAULT 'PENDING',
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY (purchaseReturnId) REFERENCES purchase_returns__migration_30(id) ON DELETE CASCADE
+          )
+        ''');
+
+        Future<void> copyRows(String table) async {
+          final columns = expectedColumns[table]!;
+          final quotedColumns = columns.map((column) => '"$column"').join(', ');
+          final target = '${table}__migration_30';
+          final selectColumns = table == 'purchase_orders'
+              ? columns
+                    .map(
+                      (column) => column == 'status'
+                          ? "CASE status WHEN 'CONFIRMED' THEN 'APPROVED' ELSE status END AS \"status\""
+                          : '"$column"',
+                    )
+                    .join(', ')
+              : quotedColumns;
+          await db.execute(
+            'INSERT INTO "$target" ($quotedColumns) SELECT $selectColumns FROM "$table"',
+          );
+        }
+
+        for (final table in tables) {
+          await copyRows(table);
+        }
+        for (final table in [
+          'purchase_receipt_items',
+          'purchase_return_items',
+          'purchase_receipts',
+          'purchase_order_items',
+          'purchase_returns',
+          'purchase_orders',
+        ]) {
+          await db.execute('DROP TABLE "$table"');
+        }
+        for (final table in tables) {
+          await db.execute(
+            'ALTER TABLE "${table}__migration_30" RENAME TO "$table"',
+          );
+        }
+        for (final row in savedIndexes) {
+          await db.execute(row['sql'] as String);
+        }
+        for (final row in savedTriggers) {
+          await db.execute(row['sql'] as String);
+        }
+        for (final table in tables) {
+          final afterCount =
+              (await db.rawQuery(
+                    'SELECT COUNT(*) AS count FROM "$table"',
+                  )).single['count']!
+                  as int;
+          if (afterCount != beforeCounts[table]) {
+            throw StateError('Row count changed while migrating $table');
+          }
+        }
+        final foreignKeyErrors = await db.rawQuery('PRAGMA foreign_key_check');
+        if (foreignKeyErrors.isNotEmpty) {
+          throw StateError(
+            'Foreign keys failed after Purchase Order migration: $foreignKeyErrors',
+          );
+        }
+        await db.execute('PRAGMA user_version = 30');
+        break;
+      case 31:
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_orders_quotation_id_unique ON sales_orders(quotationId) WHERE quotationId IS NOT NULL',
+        );
+        await db.execute('PRAGMA user_version = 31');
+        break;
+      case 32:
+        final consumptionColumns = await db.rawQuery(
+          'PRAGMA table_info(production_material_consumptions)',
+        );
+        if (!consumptionColumns.any(
+          (column) => column['name'] == 'operationId',
+        )) {
+          await db.execute(
+            'ALTER TABLE production_material_consumptions ADD COLUMN operationId TEXT',
+          );
+        }
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_production_consumption_operation ON production_material_consumptions(operationId) WHERE operationId IS NOT NULL',
+        );
+        await db.execute('PRAGMA user_version = 32');
+        break;
+      case 33:
+        final outputColumns = await db.rawQuery(
+          'PRAGMA table_info(production_outputs)',
+        );
+        if (!outputColumns.any((column) => column['name'] == 'operationId')) {
+          await db.execute(
+            'ALTER TABLE production_outputs ADD COLUMN operationId TEXT',
+          );
+        }
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_production_output_operation ON production_outputs(operationId) WHERE operationId IS NOT NULL',
+        );
+        await db.execute('PRAGMA user_version = 33');
+        break;
+      case 34:
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS product_unit_conversions (
+            id TEXT PRIMARY KEY,
+            productId TEXT NOT NULL,
+            unitId TEXT NOT NULL,
+            factorToBase REAL NOT NULL CHECK(factorToBase > 0),
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            UNIQUE(productId, unitId),
+            FOREIGN KEY (productId) REFERENCES products(id) ON DELETE RESTRICT,
+            FOREIGN KEY (unitId) REFERENCES units(id) ON DELETE RESTRICT
+          )
+        ''');
+
+        for (final column in [
+          ('productId', 'TEXT'),
+          ('variantId', 'TEXT'),
+          ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ('unitId', 'TEXT'),
+        ]) {
+          await _addColumnIfMissing(db, 'stock_balances', column.$1, column.$2);
+        }
+        for (final column in [
+          ('productId', 'TEXT'),
+          ('variantId', 'TEXT'),
+          ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ('unitId', 'TEXT'),
+        ]) {
+          await _addColumnIfMissing(
+            db,
+            'stock_transactions',
+            column.$1,
+            column.$2,
+          );
+        }
+        for (final column in [
+          ('productId', 'TEXT'),
+          ('variantId', 'TEXT'),
+          ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ('unitId', 'TEXT'),
+        ]) {
+          await _addColumnIfMissing(
+            db,
+            'inventory_valuations',
+            column.$1,
+            column.$2,
+          );
+        }
+        for (final column in [
+          ('productId', 'TEXT'),
+          ('variantId', 'TEXT'),
+          ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ('unitId', 'TEXT'),
+        ]) {
+          await _addColumnIfMissing(
+            db,
+            'stock_minimum_levels',
+            column.$1,
+            column.$2,
+          );
+        }
+
+        for (final table in [
+          'quotation_items',
+          'purchase_request_items',
+          'sales_order_items',
+          'sales_delivery_items',
+          'purchase_order_items',
+          'purchase_receipt_items',
+          'sales_return_items',
+          'purchase_return_items',
+          'production_outputs',
+        ]) {
+          for (final column in [
+            ('productId', 'TEXT'),
+            ('variantId', 'TEXT'),
+            ('baseUnitId', 'TEXT'),
+            ('unitConversionFactor', 'REAL NOT NULL DEFAULT 1'),
+            ('baseQuantity', 'REAL NOT NULL DEFAULT 0'),
+            ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+            ('identitySnapshotStatus', "TEXT NOT NULL DEFAULT 'UNVERIFIED'"),
+          ]) {
+            await _addColumnIfMissing(db, table, column.$1, column.$2);
+          }
+        }
+        for (final table in [
+          'quality_inspections',
+          'quality_inspection_items',
+        ]) {
+          for (final column in [
+            ('productId', 'TEXT'),
+            ('variantId', 'TEXT'),
+            ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ]) {
+            await _addColumnIfMissing(db, table, column.$1, column.$2);
+          }
+        }
+        await _addColumnIfMissing(
+          db,
+          'sales_deliveries',
+          'operationId',
+          'TEXT',
+        );
+        await _addColumnIfMissing(
+          db,
+          'sales_deliveries',
+          'operationPayloadHash',
+          'TEXT',
+        );
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_delivery_operation_id ON sales_deliveries(operationId) WHERE operationId IS NOT NULL',
+        );
+        await _addColumnIfMissing(
+          db,
+          'sales_order_items',
+          'deliveredBaseQuantity',
+          'REAL NOT NULL DEFAULT 0',
+        );
+        await _addColumnIfMissing(
+          db,
+          'purchase_order_items',
+          'receivedBaseQuantity',
+          'REAL NOT NULL DEFAULT 0',
+        );
+
+        await db.execute('DROP TABLE IF EXISTS temp.m03_inventory_identity');
+        await db.execute('''
+          CREATE TEMP TABLE m03_inventory_identity AS
+          SELECT keys.warehouseId, keys.itemId AS originalItemId,
+                 p.unitId AS baseUnitId,
+                 CASE
+                   WHEN p.id IS NULL
+                     OR EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = p.id)
+                     OR NOT EXISTS (
+                       SELECT 1 FROM stock_transactions st
+                       WHERE st.warehouseId = keys.warehouseId
+                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM stock_transactions st
+                       WHERE st.warehouseId = keys.warehouseId
+                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                         AND st.unitId != p.unitId
+                     )
+                     OR ABS(COALESCE((
+                       SELECT SUM(CASE
+                         WHEN st.transactionType IN ('STOCK_IN', 'TRANSFER_IN') THEN st.quantity
+                         WHEN st.transactionType IN ('STOCK_OUT', 'TRANSFER_OUT') THEN -st.quantity
+                         WHEN st.transactionType = 'ADJUSTMENT'
+                           AND COALESCE(st.reference, '') LIKE 'ADJUSTMENT_OUT:%' THEN -st.quantity
+                         WHEN st.transactionType = 'ADJUSTMENT' THEN st.quantity
+                         ELSE 0 END)
+                       FROM stock_transactions st
+                       WHERE st.warehouseId = keys.warehouseId
+                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                     ), 0) - COALESCE((
+                       SELECT sb.quantity FROM stock_balances sb
+                       WHERE sb.warehouseId = keys.warehouseId
+                         AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
+                     ), 0)) > 0.000001
+                     OR EXISTS (
+                       SELECT 1 FROM inventory_valuations iv
+                       WHERE iv.warehouseId = keys.warehouseId
+                         AND iv.itemId = keys.itemId AND iv.itemType = 'PRODUCT'
+                         AND ABS(iv.quantity - COALESCE((
+                           SELECT sb.quantity FROM stock_balances sb
+                           WHERE sb.warehouseId = keys.warehouseId
+                             AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
+                         ), 0)) > 0.000001
+                     )
+                   THEN 'LEGACY_UNASSIGNED'
+                   ELSE 'BASE'
+                 END AS inventoryIdentityKind
+          FROM (
+            SELECT warehouseId, itemId FROM stock_balances WHERE itemType = 'PRODUCT'
+            UNION SELECT warehouseId, itemId FROM stock_transactions WHERE itemType = 'PRODUCT'
+            UNION SELECT warehouseId, itemId FROM inventory_valuations WHERE itemType = 'PRODUCT'
+            UNION SELECT warehouseId, itemId FROM stock_minimum_levels WHERE itemType = 'PRODUCT'
+          ) keys
+          LEFT JOIN products p ON p.id = keys.itemId
+        ''');
+        final legacyKeyCollision = await db.rawQuery('''
+          SELECT 1
+          FROM temp.m03_inventory_identity identity
+          JOIN products p ON p.id = '__FURNEXA_LEGACY_UNASSIGNED__:' || identity.originalItemId
+          WHERE identity.inventoryIdentityKind = 'LEGACY_UNASSIGNED'
+          LIMIT 1
+        ''');
+        if (legacyKeyCollision.isNotEmpty) {
+          throw StateError(
+            'Cannot safely create a legacy inventory identity key because it conflicts with a product ID',
+          );
+        }
+
+        for (final table in [
+          'stock_balances',
+          'stock_transactions',
+          'inventory_valuations',
+          'stock_minimum_levels',
+        ]) {
+          await db.execute('''
+            UPDATE "$table"
+            SET productId = itemId,
+                inventoryIdentityKind = COALESCE((
+                  SELECT identity.inventoryIdentityKind
+                  FROM temp.m03_inventory_identity identity
+                  WHERE identity.warehouseId = "$table".warehouseId
+                    AND identity.originalItemId = "$table".itemId
+                ), 'LEGACY_UNASSIGNED'),
+                unitId = CASE
+                  WHEN itemType = 'PRODUCT' THEN (
+                    SELECT identity.baseUnitId
+                    FROM temp.m03_inventory_identity identity
+                    WHERE identity.warehouseId = "$table".warehouseId
+                      AND identity.originalItemId = "$table".itemId
+                  )
+                  ELSE unitId
+                END,
+                itemId = CASE
+                  WHEN itemType = 'PRODUCT' AND COALESCE((
+                    SELECT identity.inventoryIdentityKind
+                    FROM temp.m03_inventory_identity identity
+                    WHERE identity.warehouseId = "$table".warehouseId
+                      AND identity.originalItemId = "$table".itemId
+                  ), 'LEGACY_UNASSIGNED') = 'LEGACY_UNASSIGNED'
+                  THEN '__FURNEXA_LEGACY_UNASSIGNED__:' || itemId
+                  ELSE itemId
+                END
+            WHERE itemType = 'PRODUCT'
+          ''');
+        }
+        await db.execute('''
+          UPDATE inventory_valuations
+          SET unitId = CASE WHEN inventoryIdentityKind = 'BASE' THEN (
+            SELECT p.unitId FROM products p WHERE p.id = inventory_valuations.productId
+          ) ELSE NULL END
+          WHERE itemType = 'PRODUCT'
+        ''');
+        await db.execute('''
+          UPDATE stock_balances
+          SET unitId = (SELECT rm.unitId FROM raw_materials rm WHERE rm.id = stock_balances.itemId)
+          WHERE itemType = 'RAW_MATERIAL'
+        ''');
+        await db.execute('''
+          UPDATE stock_minimum_levels
+          SET unitId = (SELECT rm.unitId FROM raw_materials rm WHERE rm.id = stock_minimum_levels.itemId)
+          WHERE itemType = 'RAW_MATERIAL'
+        ''');
+        await db.execute('''
+          UPDATE inventory_valuations
+          SET unitId = (SELECT rm.unitId FROM raw_materials rm WHERE rm.id = inventory_valuations.itemId)
+          WHERE itemType = 'RAW_MATERIAL'
+        ''');
+
+        await db.execute('''
+          UPDATE quotation_items
+          SET productId = itemId,
+              unitConversionFactor = 1,
+              baseQuantity = quantity,
+              baseUnitId = unitId,
+              inventoryIdentityKind = CASE
+                WHEN itemType = 'PRODUCT' AND EXISTS (
+                  SELECT 1 FROM product_variants pv WHERE pv.productId = quotation_items.itemId
+                ) THEN 'LEGACY_UNASSIGNED' ELSE 'BASE' END,
+              identitySnapshotStatus = CASE
+                WHEN itemType = 'PRODUCT'
+                  AND EXISTS (SELECT 1 FROM products p WHERE p.id = quotation_items.itemId AND p.unitId = quotation_items.unitId)
+                  AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = quotation_items.itemId)
+                THEN 'VERIFIED' ELSE 'UNVERIFIED' END
+        ''');
+        await db.execute('''
+          UPDATE purchase_request_items
+          SET productId = itemId,
+              unitConversionFactor = 1,
+              baseQuantity = quantity,
+              baseUnitId = unitId,
+              inventoryIdentityKind = CASE
+                WHEN itemType = 'PRODUCT' AND EXISTS (
+                  SELECT 1 FROM product_variants pv WHERE pv.productId = purchase_request_items.itemId
+                ) THEN 'LEGACY_UNASSIGNED' ELSE 'BASE' END,
+              identitySnapshotStatus = CASE
+                WHEN itemType = 'RAW_MATERIAL' THEN 'VERIFIED'
+                WHEN EXISTS (SELECT 1 FROM products p WHERE p.id = purchase_request_items.itemId AND p.unitId = purchase_request_items.unitId)
+                  AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = purchase_request_items.itemId)
+                THEN 'VERIFIED' ELSE 'UNVERIFIED' END
+        ''');
+        await db.execute('''
+          UPDATE sales_order_items
+          SET variantId = NULL,
+              baseUnitId = unitId,
+              baseQuantity = quantity,
+              unitConversionFactor = 1,
+              inventoryIdentityKind = CASE
+                WHEN EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = sales_order_items.itemId)
+                THEN 'LEGACY_UNASSIGNED' ELSE 'BASE' END,
+              identitySnapshotStatus = CASE
+                WHEN EXISTS (SELECT 1 FROM products p WHERE p.id = sales_order_items.itemId AND p.unitId = sales_order_items.unitId)
+                  AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = sales_order_items.itemId)
+                THEN 'VERIFIED' ELSE 'UNVERIFIED' END
+        ''');
+        await db.execute('''
+                  UPDATE sales_order_items
+                  SET deliveredBaseQuantity = deliveredQuantity * unitConversionFactor
+                ''');
+        await db.execute('''
+          UPDATE sales_delivery_items
+          SET productId = (
+                SELECT soi.itemId FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ),
+              variantId = (
+                SELECT soi.variantId FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ),
+              baseUnitId = (
+                SELECT soi.baseUnitId FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ),
+              baseQuantity = deliveredQuantity * COALESCE((
+                SELECT soi.unitConversionFactor FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ), 1),
+              unitConversionFactor = COALESCE((
+                SELECT soi.unitConversionFactor FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ), 1),
+              inventoryIdentityKind = COALESCE((
+                SELECT soi.inventoryIdentityKind FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ), 'LEGACY_UNASSIGNED'),
+              identitySnapshotStatus = COALESCE((
+                SELECT soi.identitySnapshotStatus FROM sales_order_items soi WHERE soi.id = sales_delivery_items.salesOrderItemId
+              ), 'UNVERIFIED')
+        ''');
+        await db.execute('''
+          UPDATE purchase_order_items
+          SET productId = itemId,
+              unitConversionFactor = 1, baseQuantity = quantity,
+              baseUnitId = unitId,
+              inventoryIdentityKind = CASE
+                WHEN itemType = 'PRODUCT' AND EXISTS (
+                  SELECT 1 FROM product_variants pv WHERE pv.productId = purchase_order_items.itemId
+                ) THEN 'LEGACY_UNASSIGNED' ELSE 'BASE' END,
+              identitySnapshotStatus = CASE
+                WHEN itemType = 'RAW_MATERIAL' THEN 'VERIFIED'
+                WHEN EXISTS (SELECT 1 FROM products p WHERE p.id = purchase_order_items.itemId AND p.unitId = purchase_order_items.unitId)
+                  AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = purchase_order_items.itemId)
+                THEN 'VERIFIED' ELSE 'UNVERIFIED' END
+        ''');
+        await db.execute('''
+                UPDATE purchase_order_items
+                SET receivedBaseQuantity = receivedQuantity * unitConversionFactor
+              ''');
+        await db.execute('''
+          UPDATE purchase_receipt_items
+          SET productId = (SELECT poi.itemId FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId),
+              variantId = (SELECT poi.variantId FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId),
+              baseUnitId = (SELECT poi.baseUnitId FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId),
+              baseQuantity = receivedQuantity * COALESCE((SELECT poi.unitConversionFactor FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId), 1),
+              unitConversionFactor = COALESCE((SELECT poi.unitConversionFactor FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId), 1),
+              inventoryIdentityKind = COALESCE((SELECT poi.inventoryIdentityKind FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId), 'LEGACY_UNASSIGNED'),
+              identitySnapshotStatus = COALESCE((SELECT poi.identitySnapshotStatus FROM purchase_order_items poi WHERE poi.id = purchase_receipt_items.purchaseOrderItemId), 'UNVERIFIED')
+        ''');
+        await db.execute('''
+          UPDATE sales_return_items
+          SET productId = itemId,
+              variantId = (SELECT soi.variantId
+                FROM sales_delivery_items sdi
+                JOIN sales_order_items soi ON soi.id = sdi.salesOrderItemId
+                WHERE sdi.id = sales_return_items.sourceDeliveryItemId),
+              baseUnitId = (SELECT soi.baseUnitId
+                FROM sales_delivery_items sdi
+                JOIN sales_order_items soi ON soi.id = sdi.salesOrderItemId
+                WHERE sdi.id = sales_return_items.sourceDeliveryItemId),
+              unitConversionFactor = COALESCE((SELECT sdi.unitConversionFactor
+                FROM sales_delivery_items sdi WHERE sdi.id = sales_return_items.sourceDeliveryItemId), 1),
+              baseQuantity = quantity * COALESCE((SELECT sdi.unitConversionFactor
+                FROM sales_delivery_items sdi WHERE sdi.id = sales_return_items.sourceDeliveryItemId), 1),
+              inventoryIdentityKind = COALESCE((SELECT soi.inventoryIdentityKind
+                FROM sales_delivery_items sdi
+                JOIN sales_order_items soi ON soi.id = sdi.salesOrderItemId
+                WHERE sdi.id = sales_return_items.sourceDeliveryItemId), 'LEGACY_UNASSIGNED'),
+              identitySnapshotStatus = COALESCE((SELECT soi.identitySnapshotStatus
+                FROM sales_delivery_items sdi
+                JOIN sales_order_items soi ON soi.id = sdi.salesOrderItemId
+                WHERE sdi.id = sales_return_items.sourceDeliveryItemId), 'UNVERIFIED')
+        ''');
+        await db.execute('''
+          UPDATE purchase_return_items
+          SET productId = itemId,
+              variantId = (SELECT poi.variantId
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id),
+              baseUnitId = (SELECT poi.baseUnitId
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id),
+              unitConversionFactor = COALESCE((SELECT poi.unitConversionFactor
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id), 1),
+              baseQuantity = quantity * COALESCE((SELECT poi.unitConversionFactor
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id), 1),
+              inventoryIdentityKind = COALESCE((SELECT poi.inventoryIdentityKind
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id), 'LEGACY_UNASSIGNED'),
+              identitySnapshotStatus = COALESCE((SELECT poi.identitySnapshotStatus
+                FROM purchase_return_items pri
+                JOIN purchase_returns pr ON pr.id = pri.purchaseReturnId
+                JOIN purchase_order_items poi ON poi.purchaseOrderId = pr.purchaseOrderId
+                  AND poi.itemId = pri.itemId AND poi.itemType = pri.itemType AND poi.unitId = pri.unitId
+                WHERE pri.id = purchase_return_items.id), 'UNVERIFIED')
+        ''');
+        await db.execute('''
+          UPDATE production_outputs
+          SET productId = (SELECT po.productId FROM production_orders po WHERE po.id = production_outputs.productionOrderId),
+              variantId = (SELECT po.variantId FROM production_orders po WHERE po.id = production_outputs.productionOrderId),
+              baseUnitId = unitId,
+              baseQuantity = quantity,
+              identitySnapshotStatus = 'VERIFIED'
+        ''');
+        await db.execute('''
+          UPDATE quality_inspections
+          SET productId = CASE WHEN itemType = 'PRODUCT' THEN itemId ELSE NULL END
+        ''');
+        await db.execute('''
+          UPDATE quality_inspection_items
+          SET productId = CASE WHEN itemType = 'PRODUCT' THEN itemId ELSE NULL END
+        ''');
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_stock_balances_variant_identity ON stock_balances(warehouseId, productId, variantId, inventoryIdentityKind)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_stock_transactions_variant_identity ON stock_transactions(warehouseId, productId, variantId, inventoryIdentityKind, transactionDate)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_inventory_valuations_variant_identity ON inventory_valuations(warehouseId, productId, variantId, inventoryIdentityKind)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_product_unit_conversions_lookup ON product_unit_conversions(productId, unitId, active)',
+        );
+        await db.execute('DROP TABLE temp.m03_inventory_identity');
+        await db.execute('PRAGMA user_version = 34');
+        break;
+      case 35:
+        await _addColumnIfMissing(
+          db,
+          'purchase_return_items',
+          'purchaseOrderItemId',
+          'TEXT',
+        );
+        await _addColumnIfMissing(
+          db,
+          'purchase_return_items',
+          'sourceReceiptId',
+          'TEXT',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_purchase_returns_source_line ON purchase_return_items(purchaseOrderItemId)',
+        );
+        for (final column in [
+          ('sourceReturnItemId', 'TEXT'),
+          ('productId', 'TEXT'),
+          ('variantId', 'TEXT'),
+          ('inventoryIdentityKind', "TEXT NOT NULL DEFAULT 'BASE'"),
+          ('identitySnapshotStatus', "TEXT NOT NULL DEFAULT 'UNVERIFIED'"),
+          ('unitId', 'TEXT'),
+          ('baseUnitId', 'TEXT'),
+          ('unitConversionFactor', 'REAL NOT NULL DEFAULT 1'),
+          ('requestedBaseQuantity', 'REAL NOT NULL DEFAULT 0'),
+          ('inspectedBaseQuantity', 'REAL NOT NULL DEFAULT 0'),
+          ('acceptedBaseQuantity', 'REAL NOT NULL DEFAULT 0'),
+          ('rejectedBaseQuantity', 'REAL NOT NULL DEFAULT 0'),
+        ]) {
+          await _addColumnIfMissing(
+            db,
+            'quality_inspection_items',
+            column.$1,
+            column.$2,
+          );
+        }
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_quality_inspection_source_line ON quality_inspection_items(sourceReturnItemId)',
+        );
+        await db.execute('PRAGMA user_version = 35');
+        break;
+      case 36:
+        for (final column in [
+          ('unitId', 'TEXT REFERENCES units(id) ON DELETE RESTRICT'),
+          ('baseUnitId', 'TEXT REFERENCES units(id) ON DELETE RESTRICT'),
+          (
+            'unitConversionFactor',
+            'REAL CHECK(unitConversionFactor IS NULL OR unitConversionFactor > 0)',
+          ),
+          (
+            'plannedBaseQuantity',
+            'REAL CHECK(plannedBaseQuantity IS NULL OR plannedBaseQuantity > 0)',
+          ),
+          (
+            'unitSnapshotStatus',
+            "TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK(unitSnapshotStatus IN ('VERIFIED', 'UNVERIFIED') AND (unitSnapshotStatus != 'VERIFIED' OR (unitId IS NOT NULL AND baseUnitId IS NOT NULL AND unitConversionFactor IS NOT NULL AND plannedBaseQuantity IS NOT NULL)))",
+          ),
+        ]) {
+          await _addColumnIfMissing(
+            db,
+            'production_orders',
+            column.$1,
+            column.$2,
+          );
+        }
+        await db.execute('PRAGMA user_version = 36');
+        break;
+      case 37:
+        await _addColumnIfMissing(
+          db,
+          'warehouses',
+          'purpose',
+          "TEXT NOT NULL DEFAULT 'SELLABLE' CHECK(purpose IN ('SELLABLE', 'QUARANTINE', 'REWORK', 'DAMAGED'))",
+        );
+        await db.execute('PRAGMA user_version = 37');
+        break;
       default:
         break;
+    }
+  }
+
+  Future<void> _addColumnIfMissing(
+    DatabaseExecutor db,
+    String table,
+    String column,
+    String definition,
+  ) async {
+    final columns = await db.rawQuery('PRAGMA table_info("$table")');
+    if (!columns.any((value) => value['name'] == column)) {
+      await db.execute('ALTER TABLE "$table" ADD COLUMN "$column" $definition');
     }
   }
 

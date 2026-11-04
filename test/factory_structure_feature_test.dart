@@ -481,6 +481,41 @@ void main() {
 
       expect(results, hasLength(1));
       expect(results.first.factoryId, factory.id);
+      expect(results.first.type, 'مواد خام');
+      expect(results.first.purpose, WarehousePurpose.sellable);
+      final persisted = (await dataSource.database).query(
+        'warehouses',
+        where: 'id = ?',
+        whereArgs: [warehouse.id],
+      );
+      expect((await persisted).single['type'], 'مواد خام');
+      expect((await persisted).single['purpose'], 'SELLABLE');
+    });
+
+    test('persists an explicit controlled warehouse purpose', () async {
+      final factory = FactoryProfile(
+        id: 'factory-purpose',
+        name: 'مصنع الأغراض',
+        code: 'F-PURPOSE',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+      await dataSource.upsertFactory(factory);
+      final warehouse = Warehouse(
+        id: 'warehouse-quarantine',
+        factoryId: factory.id,
+        name: 'مخزن الحجر',
+        code: 'WH-QUARANTINE',
+        purpose: WarehousePurpose.quarantine,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      await dataSource.upsertWarehouse(warehouse);
+
+      final loaded = await dataSource.searchWarehouses('WH-QUARANTINE');
+      expect(loaded.single.purpose, WarehousePurpose.quarantine);
+      expect(loaded.single.type, isNull);
     });
 
     test('rejects invalid warehouse state at runtime', () async {

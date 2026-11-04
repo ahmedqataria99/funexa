@@ -13,6 +13,8 @@ class PurchasingRepositoryImpl implements PurchasingRepository {
   Future<List<Supplier>> suppliers([String query = '']) =>
       _dataSource.suppliers(query);
   @override
+  Future<Supplier?> supplierById(String id) => _dataSource.supplierById(id);
+  @override
   Future<void> saveSupplier(Supplier supplier) =>
       _dataSource.saveSupplier(supplier);
   @override
@@ -32,6 +34,9 @@ class PurchasingRepositoryImpl implements PurchasingRepository {
   @override
   Future<PurchaseRequest> saveRequest(PurchaseRequest request) =>
       _dataSource.saveRequest(request);
+  @override
+  Future<PurchaseOrder> approveRequest(String requestId) =>
+      _dataSource.approveRequest(requestId);
   @override
   Future<void> changeRequestStatus(String id, PurchaseRequestStatus status) =>
       _dataSource.changeRequestStatus(id, status);
@@ -58,8 +63,8 @@ class PurchasingRepositoryImpl implements PurchasingRepository {
     required String warehouseId,
     required DateTime receiptDate,
     required List<PurchasingItem> items,
+    required String operationId,
     String? notes,
-    String? operationId,
   }) => _dataSource.postReceipt(
     order: order,
     warehouseId: warehouseId,
@@ -72,4 +77,6 @@ class PurchasingRepositoryImpl implements PurchasingRepository {
   Future<List<Warehouse>> activeWarehouses() => _dataSource.activeWarehouses();
   @override
   Future<List<StockItemOption>> activeItems() => _dataSource.activeItems();
+  @override
+  Future<Map<String, String>> unitNames() => _dataSource.unitNames();
 }

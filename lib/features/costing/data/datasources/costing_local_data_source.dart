@@ -1,8 +1,10 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/accounting/data/datasources/accounting_local_data_source.dart';
 import 'package:furnexa/features/accounting/domain/entities/accounting_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
+import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 
 enum OverheadBase { materialCost, laborCost, materialPlusLabor }
 
@@ -218,6 +220,8 @@ class ProductionBatchCost {
 }
 
 class CostingLocalDataSource {
+  static const double _quantityTolerance = 0.000001;
+
   final SecurityLocalDataSource _security = SecurityLocalDataSource();
   Future<Database> get _db async => FurnexaDatabase.instance.database;
 
@@ -483,65 +487,168 @@ class CostingLocalDataSource {
       if (current.status == CostStatus.finalized) {
         throw Exception('لا يمكن تعديل تكلفة نهائية');
       }
-      if (current.goodFinishedQuantity <= 0) {
-        throw Exception('لا يمكن إنهاء التكلفة بكمية جيدة صفر');
+      if (current.status != CostStatus.calculated) {
+        throw Exception('يجب حساب تكلفة الإنتاج قبل اعتمادها');
       }
+
+      final orderRows = await txn.query(
+        'production_orders',
+        where: 'id = ?',
+        whereArgs: [productionOrderId],
+        limit: 1,
+      );
+      if (orderRows.isEmpty) throw Exception('أمر الإنتاج غير موجود');
+      final order = orderRows.single;
+      _requireFinalizableProductionOrder(order);
+
+      if (!current.plannedQuantity.isFinite ||
+          current.plannedQuantity <= 0 ||
+          (current.plannedQuantity -
+                      (order['plannedQuantity'] as num).toDouble())
+                  .abs() >
+              _quantityTolerance ||
+          !current.goodFinishedQuantity.isFinite ||
+          current.goodFinishedQuantity <= 0 ||
+          !current.totalCost.isFinite ||
+          current.totalCost <= 0 ||
+          !current.actualUnitCost.isFinite ||
+          current.actualUnitCost <= 0) {
+        throw Exception('تكلفة أو كمية الإنتاج غير صالحة للاعتماد');
+      }
+      final expectedUnitCost = current.totalCost / current.goodFinishedQuantity;
+      if (!expectedUnitCost.isFinite ||
+          expectedUnitCost <= 0 ||
+          (current.actualUnitCost - expectedUnitCost).abs() >
+              _quantityTolerance) {
+        throw Exception('تكلفة الوحدة المسجلة غير متوافقة مع إجمالي التكلفة');
+      }
+
+      final productId = order['productId'] as String;
+      final variantId = order['variantId'] as String?;
+      final unitId = order['unitId'] as String;
+      final baseUnitId = order['baseUnitId'] as String;
+      final factor = (order['unitConversionFactor'] as num).toDouble();
+      final plannedBaseQuantity = (order['plannedBaseQuantity'] as num)
+          .toDouble();
+      final identityKind = variantId == null
+          ? InventoryIdentityKind.base
+          : InventoryIdentityKind.variant;
+      final productRows = await txn.query(
+        'products',
+        columns: ['unitId'],
+        where: 'id = ?',
+        whereArgs: [productId],
+        limit: 1,
+      );
+      if (productRows.isEmpty || productRows.single['unitId'] != unitId) {
+        throw Exception('وحدة المنتج الحالية لا تطابق لقطة أمر الإنتاج');
+      }
+
       final outputRows = await txn.query(
         'production_outputs',
-        columns: ['warehouseId', 'quantity'],
         where: 'productionOrderId = ?',
         whereArgs: [productionOrderId],
       );
-      if (outputRows.isNotEmpty) {
-        final outputQuantity = outputRows.fold<double>(
-          0,
-          (sum, row) => sum + (row['quantity'] as num).toDouble(),
+      if (outputRows.isEmpty) {
+        throw Exception('لا يمكن اعتماد التكلفة قبل تسجيل مخرجات صالحة');
+      }
+      final byWarehouse = <String, double>{};
+      var totalOutputBaseQuantity = 0.0;
+      for (final row in outputRows) {
+        final warehouseId = row['warehouseId'];
+        final quantityValue = row['quantity'];
+        final baseQuantityValue = row['baseQuantity'];
+        final factorValue = row['unitConversionFactor'];
+        if (warehouseId is! String ||
+            warehouseId.trim().isEmpty ||
+            quantityValue is! num ||
+            baseQuantityValue is! num ||
+            factorValue is! num ||
+            row['productId'] != productId ||
+            row['variantId'] != variantId ||
+            row['unitId'] != unitId ||
+            row['baseUnitId'] != baseUnitId ||
+            row['identitySnapshotStatus'] != 'VERIFIED' ||
+            row['inventoryIdentityKind'] != identityKind.value) {
+          throw Exception('مخرجات الإنتاج لا تطابق لقطة الوحدة وهوية الأمر');
+        }
+        final quantity = quantityValue.toDouble();
+        final baseQuantity = baseQuantityValue.toDouble();
+        final outputFactor = factorValue.toDouble();
+        final calculatedBaseQuantity = quantity * outputFactor;
+        if (!quantity.isFinite ||
+            quantity <= 0 ||
+            !baseQuantity.isFinite ||
+            baseQuantity <= 0 ||
+            !outputFactor.isFinite ||
+            outputFactor != factor ||
+            !calculatedBaseQuantity.isFinite ||
+            (baseQuantity - calculatedBaseQuantity).abs() >
+                _quantityTolerance ||
+            (baseQuantity - quantity).abs() > _quantityTolerance) {
+          throw Exception('كمية مخرجات الإنتاج الأساسية غير متوافقة');
+        }
+        totalOutputBaseQuantity += baseQuantity;
+        byWarehouse[warehouseId] =
+            (byWarehouse[warehouseId] ?? 0) + baseQuantity;
+      }
+
+      final producedQuantity = (order['producedQuantity'] as num).toDouble();
+      if (!totalOutputBaseQuantity.isFinite ||
+          (totalOutputBaseQuantity - current.goodFinishedQuantity).abs() >
+              _quantityTolerance ||
+          (totalOutputBaseQuantity - producedQuantity).abs() >
+              _quantityTolerance ||
+          (producedQuantity - plannedBaseQuantity).abs() > _quantityTolerance) {
+        throw Exception('كمية الإنتاج النهائية لا تطابق المخرجات الأساسية');
+      }
+
+      final stockItemId = inventoryItemKey(
+        productId: productId,
+        type: StockItemType.product,
+        variantId: variantId,
+        identityKind: identityKind,
+      );
+      final unitCost = current.totalCost / current.goodFinishedQuantity;
+      final accounting = AccountingLocalDataSource();
+      for (final entry in byWarehouse.entries) {
+        final allocatedCost = entry.value * unitCost;
+        if (!entry.value.isFinite ||
+            entry.value <= 0 ||
+            !allocatedCost.isFinite ||
+            allocatedCost <= 0) {
+          throw Exception('توزيع تكلفة الإنتاج غير صالح');
+        }
+        await accounting.receiveProductionCostWithinTransaction(
+          executor: txn,
+          result: ProductionCostResult(
+            referenceId: '$productionOrderId:${entry.key}',
+            warehouseId: entry.key,
+            itemId: stockItemId,
+            itemType: 'PRODUCT',
+            quantity: entry.value,
+            totalCost: allocatedCost,
+            productId: productId,
+            variantId: variantId,
+            identityKind: identityKind,
+            unitId: unitId,
+          ),
         );
-        if ((outputQuantity - current.goodFinishedQuantity).abs() > 0.000001) {
-          throw Exception('الكمية النهائية لا تطابق مخرجات أمر الإنتاج');
-        }
-        final orderRows = await txn.query(
-          'production_orders',
-          columns: ['productId'],
-          where: 'id = ?',
-          whereArgs: [productionOrderId],
-          limit: 1,
-        );
-        if (orderRows.isEmpty) throw Exception('أمر الإنتاج غير موجود');
-        final byWarehouse = <String, double>{};
-        for (final row in outputRows) {
-          final warehouseId = row['warehouseId'] as String;
-          byWarehouse[warehouseId] =
-              (byWarehouse[warehouseId] ?? 0) +
-              (row['quantity'] as num).toDouble();
-        }
-        final unitCost = current.totalCost / current.goodFinishedQuantity;
-        final accounting = AccountingLocalDataSource();
-        for (final entry in byWarehouse.entries) {
-          await accounting.receiveProductionCostWithinTransaction(
-            executor: txn,
-            result: ProductionCostResult(
-              referenceId: '$productionOrderId:${entry.key}',
-              warehouseId: entry.key,
-              itemId: orderRows.single['productId'] as String,
-              itemType: 'PRODUCT',
-              quantity: entry.value,
-              totalCost: entry.value * unitCost,
-            ),
-          );
-        }
       }
       final now = DateTime.now();
-      await txn.update(
+      final changed = await txn.update(
         'production_batch_costs',
         {
           'status': CostStatus.finalized.value,
           'finalizedAt': now.millisecondsSinceEpoch,
           'updatedAt': now.millisecondsSinceEpoch,
         },
-        where: 'productionOrderId = ?',
-        whereArgs: [productionOrderId],
+        where: 'productionOrderId = ? AND status = ?',
+        whereArgs: [productionOrderId, CostStatus.calculated.value],
       );
+      if (changed != 1) {
+        throw Exception('تغيرت حالة تكلفة الإنتاج أثناء الاعتماد');
+      }
       final updated = await txn.query(
         'production_batch_costs',
         where: 'productionOrderId = ?',
@@ -560,6 +667,46 @@ class CostingLocalDataSource {
       description: 'Batch cost finalized by $user',
     );
     return batch;
+  }
+
+  void _requireFinalizableProductionOrder(Map<String, Object?> order) {
+    final unitId = order['unitId'];
+    final baseUnitId = order['baseUnitId'];
+    final factorValue = order['unitConversionFactor'];
+    final plannedValue = order['plannedQuantity'];
+    final plannedBaseValue = order['plannedBaseQuantity'];
+    if (order['status'] != 'COMPLETED') {
+      throw Exception('لا يمكن اعتماد التكلفة قبل اكتمال أمر الإنتاج');
+    }
+    if (order['unitSnapshotStatus'] != 'VERIFIED' ||
+        unitId is! String ||
+        unitId.trim().isEmpty ||
+        baseUnitId is! String ||
+        baseUnitId.trim().isEmpty ||
+        factorValue is! num ||
+        plannedValue is! num ||
+        plannedBaseValue is! num) {
+      throw Exception(
+        'لقطة الوحدة التاريخية غير معروفة؛ أوقف الاعتماد واطلب التسوية',
+      );
+    }
+    final factor = factorValue.toDouble();
+    final planned = plannedValue.toDouble();
+    final plannedBase = plannedBaseValue.toDouble();
+    final calculatedBase = planned * factor;
+    if (unitId != baseUnitId ||
+        !factor.isFinite ||
+        factor != 1.0 ||
+        !planned.isFinite ||
+        planned <= 0 ||
+        !plannedBase.isFinite ||
+        plannedBase <= 0 ||
+        !calculatedBase.isFinite ||
+        (plannedBase - calculatedBase).abs() > _quantityTolerance) {
+      throw Exception(
+        'لقطة الوحدة التاريخية غير صالحة؛ أوقف الاعتماد واطلب التسوية',
+      );
+    }
   }
 
   Future<void> allocateAttendanceToProductionOrder({

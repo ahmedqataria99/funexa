@@ -16,6 +16,19 @@ class AccountingRepositoryImpl implements AccountingRepository {
   Future<Account?> account(String id) => _source.account(id);
 
   @override
+  Future<List<PurchaseCommitment>> purchaseCommitments() =>
+      _source.purchaseCommitments();
+
+  @override
+  Future<JournalEntry?> journalEntryByReference({
+    required String referenceType,
+    required String referenceId,
+  }) => _source.journalEntryByReference(
+    referenceType: referenceType,
+    referenceId: referenceId,
+  );
+
+  @override
   Future<String> postJournal({
     required DateTime date,
     required String description,

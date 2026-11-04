@@ -88,6 +88,13 @@ class SalesItem {
     required this.itemType,
     required this.quantity,
     required this.unitId,
+    this.variantId,
+    this.baseUnitId,
+    this.unitConversionFactor = 1,
+    this.baseQuantity,
+    this.deliveredBaseQuantity = 0,
+    this.inventoryIdentityKind = 'BASE',
+    this.identitySnapshotStatus = 'VERIFIED',
     this.unitPrice = 0,
     this.discount = 0,
     this.tax = 0,
@@ -96,9 +103,16 @@ class SalesItem {
     this.notes,
   });
   final String id, itemId, unitId;
+  final String? variantId, baseUnitId;
+  final String inventoryIdentityKind, identitySnapshotStatus;
   final SalesItemType itemType;
   final double quantity, unitPrice, discount, tax, lineTotal, deliveredQuantity;
+  final double unitConversionFactor;
+  final double? baseQuantity;
+  final double deliveredBaseQuantity;
   final String? notes;
+  double get normalizedBaseQuantity =>
+      baseQuantity ?? quantity * unitConversionFactor;
   double get remainingQuantity => quantity - deliveredQuantity;
 }
 
