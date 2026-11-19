@@ -1318,6 +1318,111 @@ class AccountingLocalDataSource
     );
   }
 
+  Future<InventoryValuation>
+  consumePurchaseReturnQuarantineValueWithinTransaction({
+    required DatabaseExecutor executor,
+    required String warehouseId,
+    required String itemId,
+    required String itemType,
+    required double quantity,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+    String? unitId,
+  }) async {
+    final rows = await executor.query(
+      'inventory_valuations',
+      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+      whereArgs: [warehouseId, itemId, itemType],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw Exception('لا يوجد تقييم للمخزون');
+    final current = _valuation(rows.first);
+    return _changeValuation(
+      executor,
+      warehouseId,
+      itemId,
+      itemType,
+      quantity,
+      current.averageCost,
+      false,
+      productId: productId ?? current.productId,
+      variantId: variantId ?? current.variantId,
+      identityKind: identityKind,
+      unitId: unitId ?? current.unitId,
+      allowQuarantineConsumption: true,
+    );
+  }
+
+  Future<void> transferQuarantineInventoryValueWithinTransaction({
+    required DatabaseExecutor executor,
+    required String sourceWarehouseId,
+    required String destinationWarehouseId,
+    required String itemId,
+    required String itemType,
+    required double quantity,
+    String? productId,
+    String? variantId,
+    InventoryIdentityKind identityKind = InventoryIdentityKind.base,
+    String? unitId,
+  }) async {
+    Future<WarehousePurpose> purpose(String warehouseId) async {
+      final rows = await executor.query(
+        'warehouses',
+        columns: ['purpose'],
+        where: 'id = ? AND state = ?',
+        whereArgs: [warehouseId, 'active'],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw Exception('المخزن غير موجود أو غير نشط');
+      return WarehousePurpose.fromStorage(rows.single['purpose']);
+    }
+
+    if (await purpose(sourceWarehouseId) != WarehousePurpose.quarantine ||
+        await purpose(destinationWarehouseId) != WarehousePurpose.sellable) {
+      throw Exception('تحويل تقييم المرتجع يتطلب مخزناً محجوراً وآخر متاحاً');
+    }
+    final valuation = await valuationWithinTransaction(
+      executor,
+      sourceWarehouseId,
+      itemId,
+      itemType,
+    );
+    if (valuation == null ||
+        !quantity.isFinite ||
+        quantity <= 0 ||
+        valuation.quantity < quantity) {
+      throw Exception('تقييم مخزون المرتجع غير متاح أو غير كاف');
+    }
+    await _changeValuation(
+      executor,
+      sourceWarehouseId,
+      itemId,
+      itemType,
+      quantity,
+      valuation.averageCost,
+      false,
+      productId: productId,
+      variantId: variantId,
+      identityKind: identityKind,
+      unitId: unitId,
+      allowQuarantineConsumption: true,
+    );
+    await _changeValuation(
+      executor,
+      destinationWarehouseId,
+      itemId,
+      itemType,
+      quantity,
+      valuation.averageCost,
+      true,
+      productId: productId,
+      variantId: variantId,
+      identityKind: identityKind,
+      unitId: unitId,
+    );
+  }
+
   Future<InventoryValuation> adjustInventoryValueWithinTransaction({
     required DatabaseExecutor executor,
     required String warehouseId,
@@ -1502,6 +1607,7 @@ class AccountingLocalDataSource
     String? variantId,
     InventoryIdentityKind identityKind = InventoryIdentityKind.base,
     String? unitId,
+    bool allowQuarantineConsumption = false,
   }) async {
     if (!quantity.isFinite ||
         quantity <= 0 ||
@@ -1520,7 +1626,9 @@ class AccountingLocalDataSource
       final purpose = WarehousePurpose.fromStorage(
         warehouseRows.single['purpose'],
       );
-      if (purpose != WarehousePurpose.sellable) {
+      if (purpose != WarehousePurpose.sellable &&
+          !(allowQuarantineConsumption &&
+              purpose == WarehousePurpose.quarantine)) {
         throw Exception('لا يمكن استهلاك التقييم من مخزن ${purpose.value}');
       }
     }

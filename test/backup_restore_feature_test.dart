@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
@@ -284,4 +286,263 @@ void main() {
       throwsA(isA<Exception>()),
     );
   });
+
+  test(
+    '13. invalid checksum restore leaves original factory and stock intact',
+    () async {
+      final path =
+          '${Directory.systemTemp.path}/backup_bad_checksum_restore.furnexa';
+      await backupRestore.createBackup(destination: path);
+
+      final db = await FurnexaDatabase.instance.database;
+      await db.update(
+        'factories',
+        {'name': 'Modified Before Rejected Restore'},
+        where: 'id = ?',
+        whereArgs: ['factory-1'],
+      );
+      await db.update(
+        'stock_balances',
+        {'quantity': 42},
+        where: 'id = ?',
+        whereArgs: ['stock-1'],
+      );
+
+      final file = File(path);
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      decoded['checksum'] =
+          '0000000000000000000000000000000000000000000000000000000000000000';
+      await file.writeAsString(jsonEncode(decoded));
+
+      await expectLater(
+        backupRestore.restoreBackup(path),
+        throwsA(isA<Exception>()),
+      );
+
+      final after = await db.query(
+        'factories',
+        where: 'id = ?',
+        whereArgs: ['factory-1'],
+      );
+      final stock = await db.query(
+        'stock_balances',
+        where: 'id = ?',
+        whereArgs: ['stock-1'],
+      );
+      expect(after.single['name'], 'Modified Before Rejected Restore');
+      expect((stock.single['quantity'] as num).toDouble(), 42);
+    },
+  );
+
+  test(
+    '14. structurally invalid restore leaves original database unchanged',
+    () async {
+      final path =
+          '${Directory.systemTemp.path}/backup_missing_column_restore.furnexa';
+      await backupRestore.createBackup(destination: path);
+
+      final file = File(path);
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final database = Map<String, dynamic>.from(decoded['database'] as Map);
+      final tables = (database['tables'] as List).map((entry) {
+        final row = Map<String, dynamic>.from(entry as Map);
+        if (row['table'] == 'factories') {
+          final rows = (row['rows'] as List).map((item) {
+            final factory = Map<String, dynamic>.from(item as Map);
+            factory['unknownSafetyColumn'] = 'must fail';
+            return factory;
+          }).toList();
+          row['rows'] = rows;
+        }
+        return row;
+      }).toList();
+      database['tables'] = tables;
+      decoded['database'] = database;
+      decoded.remove('checksum');
+      decoded['checksum'] = sha256
+          .convert(utf8.encode(jsonEncode(decoded)))
+          .toString();
+      await file.writeAsString(jsonEncode(decoded));
+
+      await expectLater(
+        backupRestore.restoreBackup(path),
+        throwsA(isA<Exception>()),
+      );
+
+      final db = await FurnexaDatabase.instance.database;
+      final factory = (await db.query(
+        'factories',
+        where: 'id = ?',
+        whereArgs: ['factory-1'],
+      )).single;
+      expect(factory['name'], 'Factory Alpha');
+    },
+  );
+
+  test(
+    '15. foreign-key violation triggers rollback recovery and reopens safely',
+    () async {
+      final path =
+          '${Directory.systemTemp.path}/backup_foreign_key_restore.furnexa';
+      await backupRestore.createBackup(destination: path);
+
+      final file = File(path);
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final database = Map<String, dynamic>.from(decoded['database'] as Map);
+      final tables = (database['tables'] as List).map((entry) {
+        final row = Map<String, dynamic>.from(entry as Map);
+        if (row['table'] == 'stock_balances') {
+          final rows = (row['rows'] as List).map((item) {
+            final stock = Map<String, dynamic>.from(item as Map);
+            stock['warehouseId'] = 'missing-warehouse-for-safety-test';
+            return stock;
+          }).toList();
+          row['rows'] = rows;
+        }
+        return row;
+      }).toList();
+      database['tables'] = tables;
+      decoded['database'] = database;
+      decoded.remove('checksum');
+      decoded['checksum'] = sha256
+          .convert(utf8.encode(jsonEncode(decoded)))
+          .toString();
+      await file.writeAsString(jsonEncode(decoded));
+
+      await expectLater(
+        backupRestore.restoreBackup(path),
+        throwsA(isA<Exception>()),
+      );
+
+      final reopened = await FurnexaDatabase.instance.database;
+      expect(await reopened.rawQuery('PRAGMA integrity_check'), isNotEmpty);
+      expect(await reopened.rawQuery('PRAGMA foreign_key_check'), isEmpty);
+      expect(
+        (await reopened.rawQuery('PRAGMA foreign_keys')).single.values.single,
+        1,
+      );
+      final stock = (await reopened.query(
+        'stock_balances',
+        where: 'id = ?',
+        whereArgs: ['stock-1'],
+      )).single;
+      expect(stock['warehouseId'], 'warehouse-1');
+    },
+  );
+
+  test(
+    '16. successful restore passes integrity, foreign keys, and reopen checks',
+    () async {
+      final path =
+          '${Directory.systemTemp.path}/backup_integrity_restore.furnexa';
+      await backupRestore.createBackup(destination: path);
+
+      final db = await FurnexaDatabase.instance.database;
+      await db.update(
+        'factories',
+        {'name': 'Modified Factory'},
+        where: 'id = ?',
+        whereArgs: ['factory-1'],
+      );
+
+      await backupRestore.restoreBackup(path);
+
+      final reopened = await FurnexaDatabase.instance.database;
+      expect(
+        (await reopened.rawQuery(
+          'PRAGMA integrity_check',
+        )).single.values.single,
+        'ok',
+      );
+      expect(await reopened.rawQuery('PRAGMA foreign_key_check'), isEmpty);
+      expect(
+        (await reopened.rawQuery('PRAGMA foreign_keys')).single.values.single,
+        1,
+      );
+      final factory = (await reopened.query(
+        'factories',
+        where: 'id = ?',
+        whereArgs: ['factory-1'],
+      )).single;
+      expect(factory['name'], 'Factory Alpha');
+    },
+  );
+
+  test('17. WAL committed stock data survives backup restore', () async {
+    final path = '${Directory.systemTemp.path}/backup_wal_restore.furnexa';
+    final db = await FurnexaDatabase.instance.database;
+    await db.execute('PRAGMA journal_mode = WAL');
+    await db.update(
+      'stock_balances',
+      {'quantity': 20},
+      where: 'id = ?',
+      whereArgs: ['stock-1'],
+    );
+
+    await backupRestore.createBackup(destination: path);
+    await db.update(
+      'stock_balances',
+      {'quantity': 99},
+      where: 'id = ?',
+      whereArgs: ['stock-1'],
+    );
+
+    await backupRestore.restoreBackup(path);
+
+    final reopened = await FurnexaDatabase.instance.database;
+    final stock = (await reopened.query(
+      'stock_balances',
+      where: 'id = ?',
+      whereArgs: ['stock-1'],
+    )).single;
+    expect((stock['quantity'] as num).toDouble(), 20);
+  });
+
+  test(
+    '18. repeated restore is idempotent for stock and factory rows',
+    () async {
+      final path = '${Directory.systemTemp.path}/backup_retry_restore.furnexa';
+      await backupRestore.createBackup(destination: path);
+
+      await backupRestore.restoreBackup(path);
+      await security.login('admin', 'Furnexa-Test-Admin-2026!');
+      await backupRestore.restoreBackup(path);
+
+      final reopened = await FurnexaDatabase.instance.database;
+      expect(
+        await reopened.query(
+          'factories',
+          where: 'id = ?',
+          whereArgs: ['factory-1'],
+        ),
+        hasLength(1),
+      );
+      expect(
+        await reopened.query(
+          'stock_balances',
+          where: 'id = ?',
+          whereArgs: ['stock-1'],
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    '19. missing safety backup source is observable and does not create a file',
+    () async {
+      await FurnexaDatabase.instance.database;
+      final path = await FurnexaDatabase.instance.databasePath;
+      await FurnexaDatabase.instance.close();
+      final source = File(path);
+      if (await source.exists()) await source.delete();
+
+      final safetyPath = await backupRestore.createSafetyBackup();
+
+      expect(await File(safetyPath).exists(), isFalse);
+    },
+  );
 }

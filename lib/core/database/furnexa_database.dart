@@ -1,9 +1,21 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:furnexa/core/constants/app_constants.dart';
+import 'package:furnexa/core/database/database_path_resolver.dart';
+
+class LocalDatabaseResetResult {
+  const LocalDatabaseResetResult({
+    required this.databasePath,
+    required this.backupPath,
+  });
+
+  final String databasePath;
+  final String? backupPath;
+}
 
 class FurnexaDatabase {
   FurnexaDatabase._();
@@ -11,24 +23,53 @@ class FurnexaDatabase {
   static final FurnexaDatabase instance = FurnexaDatabase._();
 
   static Database? _database;
+  static Future<Database>? _databaseFuture;
   static int _testDatabaseSequence = 0;
   static String _databaseFileName = AppConstants.databaseName;
   static String? _testDatabaseDirectory;
+  static String? _localDevelopmentPathOverride;
 
   static String get databaseFileName => _databaseFileName;
 
   static String windowsDatabasePath({
     required String localAppData,
     required String fileName,
-  }) => join(localAppData, 'Furnexa', fileName);
+  }) => DatabasePathResolver.windowsDatabasePath(
+    localAppData: localAppData,
+    fileName: fileName,
+  );
+
+  static void setLocalDevelopmentDatabasePath(String path) {
+    if (_database != null || _databaseFuture != null) {
+      throw StateError('Database path must be configured before opening it.');
+    }
+    if (path.trim().isEmpty) {
+      throw ArgumentError.value(path, 'path', 'Database path cannot be empty.');
+    }
+    _localDevelopmentPathOverride = normalize(absolute(path));
+  }
 
   Future<Database> get database async {
     if (_database != null) {
       return _database!;
     }
 
-    _database = await _openDatabase();
-    return _database!;
+    final opening = _databaseFuture;
+    if (opening != null) {
+      return opening;
+    }
+
+    final future = _openDatabase();
+    _databaseFuture = future;
+    try {
+      final database = await future;
+      _database = database;
+      return database;
+    } finally {
+      if (identical(_databaseFuture, future)) {
+        _databaseFuture = null;
+      }
+    }
   }
 
   Future<String> get databasePath async {
@@ -66,54 +107,13 @@ class FurnexaDatabase {
   }
 
   Future<String> _resolveDatabasePath() async {
-    final testDirectory = _testDatabaseDirectory;
-    if (testDirectory != null) {
-      return join(testDirectory, _databaseFileName);
-    }
-
-    if (Platform.isWindows) {
-      final localAppData = Platform.environment['LOCALAPPDATA'];
-      if (localAppData != null && localAppData.isNotEmpty) {
-        final stablePath = windowsDatabasePath(
-          localAppData: localAppData,
-          fileName: _databaseFileName,
-        );
-        await Directory(dirname(stablePath)).create(recursive: true);
-        final stableFile = File(stablePath);
-        if (!stableFile.existsSync()) {
-          final executableDirectory = dirname(Platform.resolvedExecutable);
-          final legacyPaths = [
-            join(
-              executableDirectory,
-              '.dart_tool',
-              'sqflite_common_ffi',
-              'databases',
-              _databaseFileName,
-            ),
-            join(await getDatabasesPath(), _databaseFileName),
-          ];
-          for (final legacyPath in legacyPaths) {
-            if (normalize(absolute(legacyPath)).toLowerCase() ==
-                normalize(absolute(stablePath)).toLowerCase()) {
-              continue;
-            }
-            final legacyFile = File(legacyPath);
-            if (!legacyFile.existsSync() || legacyFile.lengthSync() == 0) {
-              continue;
-            }
-            await legacyFile.copy(stablePath);
-            final legacyWal = File('$legacyPath-wal');
-            if (legacyWal.existsSync()) {
-              await legacyWal.copy('$stablePath-wal');
-            }
-            break;
-          }
-        }
-        return stablePath;
-      }
-    }
-
-    return join(await getDatabasesPath(), _databaseFileName);
+    final resolver = DatabasePathResolver();
+    final resolution = await resolver.resolve(
+      fileName: _databaseFileName,
+      testDirectory: _testDatabaseDirectory,
+      localDevelopmentPath: _localDevelopmentPathOverride,
+    );
+    return resolution.path;
   }
 
   Future<void> _onConfigure(Database db) async {
@@ -2675,50 +2675,50 @@ class FurnexaDatabase {
         await db.execute('''
           CREATE TEMP TABLE m03_inventory_identity AS
           SELECT keys.warehouseId, keys.itemId AS originalItemId,
-                 p.unitId AS baseUnitId,
-                 CASE
-                   WHEN p.id IS NULL
-                     OR EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = p.id)
-                     OR NOT EXISTS (
-                       SELECT 1 FROM stock_transactions st
-                       WHERE st.warehouseId = keys.warehouseId
-                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
-                     )
-                     OR EXISTS (
-                       SELECT 1 FROM stock_transactions st
-                       WHERE st.warehouseId = keys.warehouseId
-                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
-                         AND st.unitId != p.unitId
-                     )
-                     OR ABS(COALESCE((
-                       SELECT SUM(CASE
-                         WHEN st.transactionType IN ('STOCK_IN', 'TRANSFER_IN') THEN st.quantity
-                         WHEN st.transactionType IN ('STOCK_OUT', 'TRANSFER_OUT') THEN -st.quantity
-                         WHEN st.transactionType = 'ADJUSTMENT'
-                           AND COALESCE(st.reference, '') LIKE 'ADJUSTMENT_OUT:%' THEN -st.quantity
-                         WHEN st.transactionType = 'ADJUSTMENT' THEN st.quantity
-                         ELSE 0 END)
-                       FROM stock_transactions st
-                       WHERE st.warehouseId = keys.warehouseId
-                         AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
-                     ), 0) - COALESCE((
-                       SELECT sb.quantity FROM stock_balances sb
-                       WHERE sb.warehouseId = keys.warehouseId
-                         AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
-                     ), 0)) > 0.000001
-                     OR EXISTS (
-                       SELECT 1 FROM inventory_valuations iv
-                       WHERE iv.warehouseId = keys.warehouseId
-                         AND iv.itemId = keys.itemId AND iv.itemType = 'PRODUCT'
-                         AND ABS(iv.quantity - COALESCE((
-                           SELECT sb.quantity FROM stock_balances sb
-                           WHERE sb.warehouseId = keys.warehouseId
-                             AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
-                         ), 0)) > 0.000001
-                     )
-                   THEN 'LEGACY_UNASSIGNED'
-                   ELSE 'BASE'
-                 END AS inventoryIdentityKind
+                  p.unitId AS baseUnitId,
+                  CASE
+                    WHEN p.id IS NULL
+                      OR EXISTS (SELECT 1 FROM product_variants pv WHERE pv.productId = p.id)
+                      OR NOT EXISTS (
+                        SELECT 1 FROM stock_transactions st
+                        WHERE st.warehouseId = keys.warehouseId
+                          AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM stock_transactions st
+                        WHERE st.warehouseId = keys.warehouseId
+                          AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                          AND st.unitId != p.unitId
+                      )
+                      OR ABS(COALESCE((
+                        SELECT SUM(CASE
+                          WHEN st.transactionType IN ('STOCK_IN', 'TRANSFER_IN') THEN st.quantity
+                          WHEN st.transactionType IN ('STOCK_OUT', 'TRANSFER_OUT') THEN -st.quantity
+                          WHEN st.transactionType = 'ADJUSTMENT'
+                            AND COALESCE(st.reference, '') LIKE 'ADJUSTMENT_OUT:%' THEN -st.quantity
+                          WHEN st.transactionType = 'ADJUSTMENT' THEN st.quantity
+                          ELSE 0 END)
+                        FROM stock_transactions st
+                        WHERE st.warehouseId = keys.warehouseId
+                          AND st.itemId = keys.itemId AND st.itemType = 'PRODUCT'
+                      ), 0) - COALESCE((
+                        SELECT sb.quantity FROM stock_balances sb
+                        WHERE sb.warehouseId = keys.warehouseId
+                          AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
+                      ), 0)) > 0.000001
+                      OR EXISTS (
+                        SELECT 1 FROM inventory_valuations iv
+                        WHERE iv.warehouseId = keys.warehouseId
+                          AND iv.itemId = keys.itemId AND iv.itemType = 'PRODUCT'
+                          AND ABS(iv.quantity - COALESCE((
+                            SELECT sb.quantity FROM stock_balances sb
+                            WHERE sb.warehouseId = keys.warehouseId
+                              AND sb.itemId = keys.itemId AND sb.itemType = 'PRODUCT'
+                          ), 0)) > 0.000001
+                      )
+                    THEN 'LEGACY_UNASSIGNED'
+                    ELSE 'BASE'
+                  END AS inventoryIdentityKind
           FROM (
             SELECT warehouseId, itemId FROM stock_balances WHERE itemType = 'PRODUCT'
             UNION SELECT warehouseId, itemId FROM stock_transactions WHERE itemType = 'PRODUCT'
@@ -3075,6 +3075,234 @@ class FurnexaDatabase {
         );
         await db.execute('PRAGMA user_version = 37');
         break;
+      case 38:
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sales_return_receipts (
+            id TEXT PRIMARY KEY,
+            receiptNumber TEXT NOT NULL UNIQUE,
+            salesReturnId TEXT NOT NULL,
+            warehouseId TEXT NOT NULL,
+            receiptDate INTEGER NOT NULL,
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY (salesReturnId) REFERENCES sales_returns(id) ON DELETE RESTRICT,
+            FOREIGN KEY (warehouseId) REFERENCES warehouses(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sales_return_receipt_items (
+            id TEXT PRIMARY KEY,
+            receiptId TEXT NOT NULL,
+            salesReturnItemId TEXT NOT NULL,
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            baseQuantity REAL NOT NULL CHECK(baseQuantity > 0),
+            UNIQUE(receiptId, salesReturnItemId),
+            FOREIGN KEY (receiptId) REFERENCES sales_return_receipts(id) ON DELETE CASCADE,
+            FOREIGN KEY (salesReturnItemId) REFERENCES sales_return_items(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_sales_return_receipts_return ON sales_return_receipts(salesReturnId, receiptDate)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_sales_return_receipt_items_line ON sales_return_receipt_items(salesReturnItemId)',
+        );
+        await db.execute('PRAGMA user_version = 38');
+        break;
+      case 39:
+        await _addColumnIfMissing(db, 'purchase_returns', 'approvedBy', 'TEXT');
+        await _addColumnIfMissing(
+          db,
+          'purchase_returns',
+          'approvedAt',
+          'INTEGER',
+        );
+        await _addColumnIfMissing(
+          db,
+          'purchase_returns',
+          'approvalNotes',
+          'TEXT',
+        );
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS purchase_return_receipts (
+            id TEXT PRIMARY KEY,
+            receiptNumber TEXT NOT NULL UNIQUE,
+            purchaseReturnId TEXT NOT NULL,
+            warehouseId TEXT NOT NULL,
+            receiptDate INTEGER NOT NULL,
+            receivedBy TEXT,
+            notes TEXT,
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY (purchaseReturnId) REFERENCES purchase_returns(id) ON DELETE RESTRICT,
+            FOREIGN KEY (warehouseId) REFERENCES warehouses(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS purchase_return_receipt_items (
+            id TEXT PRIMARY KEY,
+            receiptId TEXT NOT NULL,
+            purchaseReturnItemId TEXT NOT NULL,
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            baseQuantity REAL NOT NULL CHECK(baseQuantity > 0),
+            movementReference TEXT NOT NULL UNIQUE,
+            UNIQUE(receiptId, purchaseReturnItemId),
+            FOREIGN KEY (receiptId) REFERENCES purchase_return_receipts(id) ON DELETE CASCADE,
+            FOREIGN KEY (purchaseReturnItemId) REFERENCES purchase_return_items(id) ON DELETE RESTRICT
+          )
+        ''');
+        await _addColumnIfMissing(
+          db,
+          'quality_inspections',
+          'purchaseReturnReceiptId',
+          'TEXT REFERENCES purchase_return_receipts(id) ON DELETE RESTRICT',
+        );
+        await _addColumnIfMissing(
+          db,
+          'quality_inspection_items',
+          'purchaseReturnReceiptItemId',
+          'TEXT REFERENCES purchase_return_receipt_items(id) ON DELETE RESTRICT',
+        );
+        await _addColumnIfMissing(
+          db,
+          'quality_inspection_items',
+          'quarantinedQuantity',
+          'REAL NOT NULL DEFAULT 0',
+        );
+        await _addColumnIfMissing(
+          db,
+          'quality_inspection_items',
+          'quarantinedBaseQuantity',
+          'REAL NOT NULL DEFAULT 0',
+        );
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS purchase_return_handovers (
+            id TEXT PRIMARY KEY,
+            handoverNumber TEXT NOT NULL UNIQUE,
+            purchaseReturnId TEXT NOT NULL,
+            supplierId TEXT NOT NULL,
+            warehouseId TEXT NOT NULL,
+            handoverDate INTEGER NOT NULL,
+            performedBy TEXT,
+            notes TEXT,
+            journalEntryId TEXT UNIQUE,
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY (purchaseReturnId) REFERENCES purchase_returns(id) ON DELETE RESTRICT,
+            FOREIGN KEY (supplierId) REFERENCES suppliers(id) ON DELETE RESTRICT,
+            FOREIGN KEY (warehouseId) REFERENCES warehouses(id) ON DELETE RESTRICT,
+            FOREIGN KEY (journalEntryId) REFERENCES journal_entries(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS purchase_return_handover_items (
+            id TEXT PRIMARY KEY,
+            handoverId TEXT NOT NULL,
+            purchaseReturnItemId TEXT NOT NULL,
+            purchaseReturnReceiptItemId TEXT NOT NULL,
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            baseQuantity REAL NOT NULL CHECK(baseQuantity > 0),
+            movementReference TEXT NOT NULL UNIQUE,
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY (handoverId) REFERENCES purchase_return_handovers(id) ON DELETE CASCADE,
+            FOREIGN KEY (purchaseReturnItemId) REFERENCES purchase_return_items(id) ON DELETE RESTRICT,
+            FOREIGN KEY (purchaseReturnReceiptItemId) REFERENCES purchase_return_receipt_items(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_purchase_return_receipts_return ON purchase_return_receipts(purchaseReturnId, receiptDate)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_purchase_return_receipt_items_line ON purchase_return_receipt_items(purchaseReturnItemId)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_purchase_return_handovers_return ON purchase_return_handovers(purchaseReturnId, handoverDate)',
+        );
+        await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_purchase_return_handover_items_line ON purchase_return_handover_items(purchaseReturnItemId)',
+        );
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_purchase_return_inspections_receipt
+          ON quality_inspections(purchaseReturnReceiptId, inspectionDate)
+          WHERE sourceType = 'PURCHASE_RETURN' AND purchaseReturnReceiptId IS NOT NULL
+        ''');
+        await db.execute('PRAGMA user_version = 39');
+        break;
+      case 40:
+        await _addColumnIfMissing(
+          db,
+          'sales_deliveries',
+          'inventoryPosted',
+          'INTEGER NOT NULL DEFAULT 1 CHECK(inventoryPosted IN (0, 1))',
+        );
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_sales_deliveries_reservation_status
+          ON sales_deliveries(status, inventoryPosted, warehouseId)
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_sales_delivery_items_reservation_identity
+          ON sales_delivery_items(
+            salesDeliveryId,
+            productId,
+            variantId,
+            inventoryIdentityKind,
+            baseUnitId,
+            salesOrderItemId
+          )
+        ''');
+        await db.execute('PRAGMA user_version = 40');
+        break;
+      case 41:
+        await _addColumnIfMissing(
+          db,
+          'sales_order_items',
+          'invoicedQuantity',
+          'REAL NOT NULL DEFAULT 0 CHECK(invoicedQuantity >= 0)',
+        );
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sales_invoices (
+            id TEXT PRIMARY KEY,
+            invoiceNumber TEXT NOT NULL UNIQUE,
+            salesOrderId TEXT NOT NULL,
+            customerId TEXT NOT NULL,
+            invoiceDate INTEGER NOT NULL,
+            subtotal REAL NOT NULL CHECK(subtotal >= 0),
+            discount REAL NOT NULL CHECK(discount >= 0),
+            tax REAL NOT NULL CHECK(tax >= 0),
+            grandTotal REAL NOT NULL CHECK(grandTotal >= 0),
+            status TEXT NOT NULL DEFAULT 'POSTED' CHECK(status IN ('POSTED', 'CANCELLED')),
+            operationId TEXT NOT NULL UNIQUE,
+            operationPayloadHash TEXT NOT NULL,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            FOREIGN KEY (salesOrderId) REFERENCES sales_orders(id) ON DELETE RESTRICT,
+            FOREIGN KEY (customerId) REFERENCES customers(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sales_invoice_items (
+            id TEXT PRIMARY KEY,
+            salesInvoiceId TEXT NOT NULL,
+            salesOrderItemId TEXT NOT NULL,
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            unitId TEXT NOT NULL,
+            unitPrice REAL NOT NULL CHECK(unitPrice >= 0),
+            orderDiscount REAL NOT NULL CHECK(orderDiscount >= 0),
+            invoiceDiscount REAL NOT NULL CHECK(invoiceDiscount >= 0),
+            tax REAL NOT NULL CHECK(tax >= 0),
+            lineTotal REAL NOT NULL CHECK(lineTotal >= 0),
+            FOREIGN KEY (salesInvoiceId) REFERENCES sales_invoices(id) ON DELETE RESTRICT,
+            FOREIGN KEY (salesOrderItemId) REFERENCES sales_order_items(id) ON DELETE RESTRICT,
+            FOREIGN KEY (unitId) REFERENCES units(id) ON DELETE RESTRICT
+          )
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_sales_invoices_order_date
+          ON sales_invoices(salesOrderId, invoiceDate)
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_sales_invoice_items_order_item
+          ON sales_invoice_items(salesOrderItemId, salesInvoiceId)
+        ''');
+        await db.execute('PRAGMA user_version = 41');
+        break;
       default:
         break;
     }
@@ -3093,11 +3321,100 @@ class FurnexaDatabase {
   }
 
   Future<void> close() async {
+    final opening = _databaseFuture;
+    if (opening != null) {
+      try {
+        await opening;
+      } on Object {
+        _databaseFuture = null;
+      }
+    }
+
     final db = _database;
     if (db != null && db.isOpen) {
       await db.close();
     }
     _database = null;
+  }
+
+  Future<LocalDatabaseResetResult> resetForLocalDevelopment() async {
+    if (_isNonDebugBuild ||
+        !(Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      throw UnsupportedError(
+        'Local database reset is available only in desktop development builds.',
+      );
+    }
+
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+    }
+
+    final path = await databasePath;
+    final db = _database;
+    if (db != null && db.isOpen) {
+      try {
+        final checkpoint = await db.rawQuery('PRAGMA wal_checkpoint(FULL)');
+        if (checkpoint.isNotEmpty && checkpoint.first['busy'] != 0) {
+          throw StateError('SQLite WAL checkpoint was busy; reset aborted.');
+        }
+      } finally {
+        await close();
+      }
+    } else {
+      await close();
+    }
+
+    final databaseFile = File(path);
+    final walFile = File('$path-wal');
+    final shmFile = File('$path-shm');
+    final hasDatabase = await databaseFile.exists();
+    final hasWal = await walFile.exists();
+    final hasShm = await shmFile.exists();
+
+    if (!hasDatabase && (hasWal || hasShm)) {
+      throw StateError(
+        'SQLite sidecar files exist without the database; reset aborted.',
+      );
+    }
+
+    String? backupPath;
+    if (hasDatabase) {
+      backupPath =
+          '$path.backup-${DateTime.now().toUtc().microsecondsSinceEpoch}';
+      final backupFiles = <File, File>{
+        databaseFile: File(backupPath),
+        if (hasWal) walFile: File('$backupPath-wal'),
+        if (hasShm) shmFile: File('$backupPath-shm'),
+      };
+
+      for (final entry in backupFiles.entries) {
+        if (await entry.value.exists()) {
+          throw StateError(
+            'Backup destination already exists: ${entry.value.path}',
+          );
+        }
+        await entry.key.copy(entry.value.path);
+        final sourceDigest = await _sha256File(entry.key);
+        final backupDigest = await _sha256File(entry.value);
+        if (sourceDigest != backupDigest) {
+          throw StateError(
+            'Database backup verification failed for ${entry.key.path}; reset aborted.',
+          );
+        }
+      }
+    }
+
+    if (hasShm) await shmFile.delete();
+    if (hasWal) await walFile.delete();
+    if (hasDatabase) await databaseFile.delete();
+
+    _database = await _openDatabase();
+    return LocalDatabaseResetResult(databasePath: path, backupPath: backupPath);
+  }
+
+  Future<String> _sha256File(File file) async {
+    return (await sha256.bind(file.openRead()).first).toString();
   }
 
   Future<void> resetForTesting() async {
@@ -3121,3 +3438,7 @@ class FurnexaDatabase {
     }
   }
 }
+
+const bool _isNonDebugBuild =
+    bool.fromEnvironment('dart.vm.product') ||
+    bool.fromEnvironment('dart.vm.profile');

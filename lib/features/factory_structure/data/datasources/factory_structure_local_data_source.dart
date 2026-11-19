@@ -508,43 +508,74 @@ class FactoryStructureLocalDataSource {
   Future<void> upsertWarehouse(Warehouse warehouse) async {
     _security.require('WAREHOUSE_STOCK_EDIT');
     final db = await database;
-    if ((await db.query(
-      'warehouses',
-      columns: ['id'],
-      where: 'id = ?',
-      whereArgs: [warehouse.id],
-      limit: 1,
-    )).isNotEmpty) {
-      await _security.requireResourceScope(ScopeType.warehouse, warehouse.id);
-    }
-    final exists = await db.query(
-      'warehouses',
-      columns: ['id'],
-      where: 'id = ?',
-      whereArgs: [warehouse.id],
-      limit: 1,
-    );
-    final duplicate = await db.query(
-      'warehouses',
-      where: 'factoryId = ? AND code = ? AND id != ?',
-      whereArgs: [warehouse.factoryId, warehouse.code.trim(), warehouse.id],
-    );
-    if (duplicate.isNotEmpty) {
-      throw Exception('Warehouse code must be unique within the factory');
-    }
+    final wasCreated = await db.transaction((txn) async {
+      final existing = await txn.query(
+        'warehouses',
+        columns: ['purpose'],
+        where: 'id = ?',
+        whereArgs: [warehouse.id],
+        limit: 1,
+      );
+      final isNew = existing.isEmpty;
+      if (!isNew) {
+        await _security.requireResourceScope(ScopeType.warehouse, warehouse.id);
+        final currentPurpose = WarehousePurpose.fromStorage(
+          existing.single['purpose'],
+        );
+        if (currentPurpose != warehouse.purpose) {
+          final nonZeroBalances = await txn.query(
+            'stock_balances',
+            columns: ['id'],
+            where: 'warehouseId = ? AND quantity <> 0',
+            whereArgs: [warehouse.id],
+            limit: 1,
+          );
+          final nonZeroValuations = await txn.query(
+            'inventory_valuations',
+            columns: ['id'],
+            where: 'warehouseId = ? AND quantity * averageCost <> 0',
+            whereArgs: [warehouse.id],
+            limit: 1,
+          );
+          if (nonZeroBalances.isNotEmpty || nonZeroValuations.isNotEmpty) {
+            throw Exception(
+              'Cannot change warehouse purpose while it contains stock or inventory value. Move or clear all stock first.',
+            );
+          }
+        }
+      }
 
-    await db.insert(
-      'warehouses',
-      warehouse.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+      final duplicate = await txn.query(
+        'warehouses',
+        columns: ['id'],
+        where: 'factoryId = ? AND code = ? AND id != ?',
+        whereArgs: [warehouse.factoryId, warehouse.code.trim(), warehouse.id],
+        limit: 1,
+      );
+      if (duplicate.isNotEmpty) {
+        throw Exception('Warehouse code must be unique within the factory');
+      }
+
+      final values = warehouse.toMap();
+      if (isNew) {
+        await txn.insert('warehouses', values);
+      } else {
+        await txn.update(
+          'warehouses',
+          values,
+          where: 'id = ?',
+          whereArgs: [warehouse.id],
+        );
+      }
+      return isNew;
+    });
     await FurnexaDatabaseDiagnostics.capture(
       source: 'warehouse.create',
       entityType: 'warehouse',
       entityId: warehouse.id,
     );
     await _security.audit(
-      action: exists.isEmpty
+      action: wasCreated
           ? 'CREATE'
           : warehouse.state == 'inactive'
           ? 'DEACTIVATE'

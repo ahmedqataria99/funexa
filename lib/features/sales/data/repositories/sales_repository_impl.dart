@@ -33,6 +33,30 @@ class SalesRepositoryImpl implements SalesRepository {
   Future<SalesOrder> saveOrder(SalesOrder order) =>
       _dataSource.saveOrder(order);
   @override
+  Future<SalesInvoice> issueInvoice({
+    required String salesOrderId,
+    required DateTime invoiceDate,
+    required List<SalesInvoiceLineRequest> items,
+    required String operationId,
+    double invoiceDiscount = 0,
+  }) => _dataSource.issueInvoice(
+    salesOrderId: salesOrderId,
+    invoiceDate: invoiceDate,
+    items: items,
+    operationId: operationId,
+    invoiceDiscount: invoiceDiscount,
+  );
+  @override
+  Future<SalesOrder> updateSalesOrderItemPrice({
+    required String salesOrderId,
+    required String salesOrderItemId,
+    required double unitPrice,
+  }) => _dataSource.updateSalesOrderItemPrice(
+    salesOrderId: salesOrderId,
+    salesOrderItemId: salesOrderItemId,
+    unitPrice: unitPrice,
+  );
+  @override
   Future<SalesOrder> convertQuotationToOrder(
     Quotation quotation,
     SalesOrder order,
@@ -43,6 +67,14 @@ class SalesRepositoryImpl implements SalesRepository {
   @override
   Future<List<SalesDelivery>> deliveries(String orderId) =>
       _dataSource.deliveries(orderId);
+  @override
+  Future<DeliveryStockAvailability> deliveryAvailability({
+    required String warehouseId,
+    required SalesItem orderItem,
+  }) => _dataSource.deliveryAvailability(
+    warehouseId: warehouseId,
+    orderItem: orderItem,
+  );
   @override
   Future<SalesDelivery> updateDeliveryDispatch({
     required String deliveryId,

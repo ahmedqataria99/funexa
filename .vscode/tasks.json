@@ -109,36 +109,6 @@
 		},
 		{
 			"label": "full regression summary after clean",
-			"type": "shell",
-			"command": "flutter test --concurrency=1 > test-output.txt 2>&1; echo EXIT:$LASTEXITCODE; Get-Content test-output.txt -Tail 40",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "Flutter CRM test",
-			"type": "shell",
-			"command": "flutter test test/crm_feature_test.dart",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "Flutter full regression",
-			"type": "shell",
-			"command": "flutter test --concurrency=1",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
-		{
-			"label": "full regression serial",
-			"type": "shell",
-			"command": "flutter test --concurrency=1",
-			"isBackground": false,
-			"problemMatcher": [],
-			"group": "test"
-		},
 		{
 			"label": "flutter analyze",
 			"type": "shell",
@@ -443,6 +413,36 @@
 			"label": "Read-only existing DB baseline retry",
 			"type": "shell",
 			"command": "py",
+				},
+				{
+					"label": "Focused Purchase Returns validation",
+					"type": "shell",
+					"command": "C:\\flutter\\bin\\flutter.bat",
+					"args": [
+						"test",
+						"--reporter=expanded",
+						"--concurrency=1",
+						"test/returns_quality_feature_test.dart",
+						"--plain-name",
+						"purchase return"
+					],
+					"isBackground": false,
+					"problemMatcher": [],
+					"group": "test"
+				},
+				{
+					"label": "Focused Sales Returns UI validation",
+					"type": "shell",
+					"command": "C:\\flutter\\bin\\flutter.bat",
+					"args": [
+						"test",
+						"--reporter=expanded",
+						"--concurrency=1",
+						"test/sales_returns_ui_test.dart"
+					],
+					"isBackground": false,
+					"problemMatcher": [],
+					"group": "test"
 			"args": [
 				"-3",
 				"-c",
@@ -817,6 +817,32 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "test"
+		},
+		{
+			"label": "Temporary native asset process inspection",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$log = Join-Path $env:TEMP 'furnexa-sales-returns-backend.log'; if (Test-Path $log) { Get-Content -LiteralPath $log -Encoding Unicode -Tail 220 }"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Temporary stop stalled Sales Returns UI test",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Stop-Process -Id 21176,148 -Force -ErrorAction SilentlyContinue"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
 		},
 	]
 }

@@ -6,9 +6,11 @@ import 'package:furnexa/features/sales/domain/entities/sales_entities.dart';
 import 'package:furnexa/features/sales/presentation/pages/sales_page.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
+import 'package:furnexa/features/users_roles_permissions/domain/entities/security_entities.dart';
 import 'test_helpers/database_test_helper.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late SalesLocalDataSource dataSource;
   late String suffix;
   late DateTime now;
@@ -111,6 +113,10 @@ void main() {
       'warehouseId': warehouseId,
       'itemId': productId,
       'itemType': 'PRODUCT',
+      'productId': productId,
+      'variantId': null,
+      'inventoryIdentityKind': 'BASE',
+      'unitId': unitId,
       'quantity': 100,
       'createdAt': stamp,
       'updatedAt': stamp,
@@ -222,6 +228,246 @@ void main() {
       containsAll([productId, secondProductId]),
     );
   });
+
+  test(
+    'sales invoices preserve order prices, partial quantities, and discounts',
+    () async {
+      final db = await FurnexaDatabase.instance.database;
+      final orderItemId = 'invoice-price-item-$suffix';
+      final value = SalesOrder(
+        id: 'invoice-price-order-$suffix',
+        orderNumber: 'SO-INVOICE-$suffix',
+        customerId: customerId,
+        orderDate: now,
+        status: SalesOrderStatus.confirmed,
+        subtotal: 40000,
+        discount: 0,
+        tax: 0,
+        grandTotal: 40000,
+        createdAt: now,
+        updatedAt: now,
+        items: [
+          SalesItem(
+            id: orderItemId,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 4,
+            unitId: unitId,
+            unitPrice: 10000,
+            lineTotal: 40000,
+          ),
+        ],
+      );
+      await db.insert('pricing_lists', {
+        'id': 'invoice-price-list-$suffix',
+        'code': 'DEMO-INVOICE-$suffix',
+        'name': 'Invoice price test',
+        'active': 1,
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      await db.insert('product_prices', {
+        'id': 'invoice-catalog-price-$suffix',
+        'priceListId': 'invoice-price-list-$suffix',
+        'productId': productId,
+        'unitPrice': 10000,
+        'currency': 'EGP',
+        'active': 1,
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+      await dataSource.saveOrder(value);
+      final reopened = (await dataSource.orders()).singleWhere(
+        (orderValue) => orderValue.id == value.id,
+      );
+      expect(reopened.items.single.unitPrice, 10000);
+
+      await db.update(
+        'product_prices',
+        {'unitPrice': 20000},
+        where: 'id = ?',
+        whereArgs: ['invoice-catalog-price-$suffix'],
+      );
+
+      final firstInvoice = await dataSource.issueInvoice(
+        salesOrderId: value.id,
+        invoiceDate: now,
+        items: [
+          SalesInvoiceLineRequest(salesOrderItemId: orderItemId, quantity: 2),
+        ],
+        operationId: 'invoice-part-one-$suffix',
+        invoiceDiscount: 2000,
+      );
+      expect(firstInvoice.subtotal, 20000);
+      expect(firstInvoice.discount, 2000);
+      expect(firstInvoice.grandTotal, 18000);
+      final firstLine = (await db.query(
+        'sales_invoice_items',
+        where: 'salesInvoiceId = ?',
+        whereArgs: [firstInvoice.id],
+      )).single;
+      expect(firstLine['unitPrice'], 10000);
+      expect(firstLine['quantity'], 2);
+      expect(firstLine['lineTotal'], 18000);
+
+      final journal = (await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_INVOICE', firstInvoice.id],
+      )).single;
+      final journalLines = await db.rawQuery(
+        '''
+        SELECT a.code AS accountCode, jl.debit, jl.credit
+        FROM journal_lines jl
+        JOIN accounts a ON a.id = jl.accountId
+        WHERE jl.journalEntryId = ?
+        ''',
+        [journal['id']],
+      );
+      expect(journalLines, hasLength(2));
+      expect(
+        (journalLines.singleWhere(
+                  (line) => line['accountCode'] == '1200',
+                )['debit']
+                as num)
+            .toDouble(),
+        18000,
+      );
+      expect(
+        (journalLines.singleWhere(
+                  (line) => line['accountCode'] == '4000',
+                )['credit']
+                as num)
+            .toDouble(),
+        18000,
+      );
+      expect(
+        (await db.query(
+          'journal_parties',
+          where: 'journalEntryId = ?',
+          whereArgs: [journal['id']],
+        )).single['partyId'],
+        customerId,
+      );
+
+      final replay = await dataSource.issueInvoice(
+        salesOrderId: value.id,
+        invoiceDate: now,
+        items: [
+          SalesInvoiceLineRequest(salesOrderItemId: orderItemId, quantity: 2),
+        ],
+        operationId: 'invoice-part-one-$suffix',
+        invoiceDiscount: 2000,
+      );
+      expect(replay.id, firstInvoice.id);
+      expect(
+        await db.query(
+          'sales_invoices',
+          where: 'salesOrderId = ?',
+          whereArgs: [value.id],
+        ),
+        hasLength(1),
+      );
+      await expectLater(
+        dataSource.issueInvoice(
+          salesOrderId: value.id,
+          invoiceDate: now,
+          items: [
+            SalesInvoiceLineRequest(salesOrderItemId: orderItemId, quantity: 1),
+          ],
+          operationId: 'invoice-part-one-$suffix',
+          invoiceDiscount: 2000,
+        ),
+        throwsException,
+      );
+
+      final secondInvoice = await dataSource.issueInvoice(
+        salesOrderId: value.id,
+        invoiceDate: now,
+        items: [
+          SalesInvoiceLineRequest(salesOrderItemId: orderItemId, quantity: 2),
+        ],
+        operationId: 'invoice-part-two-$suffix',
+      );
+      expect(secondInvoice.subtotal, 20000);
+      expect(secondInvoice.grandTotal, 20000);
+      expect(
+        (await db.query(
+          'sales_invoice_items',
+          where: 'salesInvoiceId = ?',
+          whereArgs: [secondInvoice.id],
+        )).single['unitPrice'],
+        10000,
+      );
+      final afterInvoicing = (await dataSource.orders()).singleWhere(
+        (orderValue) => orderValue.id == value.id,
+      );
+      expect(afterInvoicing.items.single.unitPrice, 10000);
+      expect(afterInvoicing.items.single.invoicedQuantity, 4);
+      await expectLater(
+        dataSource.updateSalesOrderItemPrice(
+          salesOrderId: value.id,
+          salesOrderItemId: orderItemId,
+          unitPrice: 12000,
+        ),
+        throwsException,
+      );
+    },
+  );
+
+  test(
+    'explicit order price edits recalculate totals and write audit history',
+    () async {
+      final orderItemId = 'price-edit-item-$suffix';
+      final value = SalesOrder(
+        id: 'price-edit-order-$suffix',
+        orderNumber: 'SO-PRICE-EDIT-$suffix',
+        customerId: customerId,
+        orderDate: now,
+        status: SalesOrderStatus.confirmed,
+        subtotal: 200,
+        discount: 10,
+        tax: 5,
+        grandTotal: 195,
+        createdAt: now,
+        updatedAt: now,
+        items: [
+          SalesItem(
+            id: orderItemId,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 2,
+            unitId: unitId,
+            unitPrice: 100,
+            discount: 10,
+            tax: 5,
+            lineTotal: 195,
+          ),
+        ],
+      );
+      await dataSource.saveOrder(value);
+
+      final updated = await dataSource.updateSalesOrderItemPrice(
+        salesOrderId: value.id,
+        salesOrderItemId: orderItemId,
+        unitPrice: 150,
+      );
+
+      expect(updated.items.single.unitPrice, 150);
+      expect(updated.items.single.lineTotal, 295);
+      expect(updated.subtotal, 300);
+      expect(updated.discount, 10);
+      expect(updated.tax, 5);
+      expect(updated.grandTotal, 295);
+      final audit = (await (await FurnexaDatabase.instance.database).query(
+        'audit_logs',
+        where: 'action = ? AND entityId = ?',
+        whereArgs: ['SALES_ORDER_PRICE_CHANGED', orderItemId],
+      )).single;
+      expect(audit['oldValue'], '100.00');
+      expect(audit['newValue'], '150.00');
+    },
+  );
 
   test(
     'sales document pdf generation resolves persisted customer and product identities',
@@ -351,6 +597,22 @@ void main() {
       'averageCost': averageCost,
       'updatedAt': now.millisecondsSinceEpoch,
     });
+  }
+
+  Future<SalesDelivery> completeDelivery(SalesDelivery delivery) async {
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.dispatched,
+      dispatchDate: now,
+    );
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.inTransit,
+    );
+    return dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.delivered,
+    );
   }
 
   Future<void> seedVariantInventory({
@@ -698,22 +960,126 @@ void main() {
           where: 'reference = ?',
           whereArgs: [first.deliveryNumber],
         ),
-        hasLength(1),
+        isEmpty,
       );
       final journals = await db.query(
         'journal_entries',
         where: 'referenceType = ? AND referenceId = ?',
         whereArgs: ['SALES_DELIVERY', first.id],
       );
-      expect(journals, hasLength(1));
-      expect(
-        await db.query(
-          'journal_lines',
-          where: 'journalEntryId = ?',
-          whereArgs: [journals.single['id']],
-        ),
-        hasLength(4),
+      expect(journals, isEmpty);
+    },
+  );
+
+  test(
+    'delivery operation ID replays after its warehouse is deactivated',
+    () async {
+      final value = order('operation-inactive-warehouse-$suffix');
+      await dataSource.saveOrder(value);
+      await seedProductValuation();
+      final requestItem = SalesItem(
+        id: value.items.single.id,
+        itemId: productId,
+        itemType: SalesItemType.product,
+        quantity: 10,
+        unitId: unitId,
       );
+      final first = await dataSource.postDelivery(
+        order: value,
+        operationId: 'operation-inactive-warehouse-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [requestItem],
+      );
+      final db = await FurnexaDatabase.instance.database;
+      await db.update(
+        'warehouses',
+        {'state': 'inactive'},
+        where: 'id = ?',
+        whereArgs: [warehouseId],
+      );
+      final beforeReplay = await deliveryMutationState(value.id);
+
+      final replay = await dataSource.postDelivery(
+        order: value,
+        operationId: 'operation-inactive-warehouse-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [requestItem],
+      );
+
+      expect(replay.id, first.id);
+      expect(await deliveryMutationState(value.id), beforeReplay);
+
+      final otherWarehouseId = await createSecondaryWarehouse();
+      final security = SecurityLocalDataSource();
+      final role = await security.createRole(name: 'Delivery Scope $suffix');
+      await security.setRolePermissions(role.id, ['SALES_DELIVER']);
+      final user = await security.createUser(
+        username: 'delivery-scope-$suffix',
+        displayName: 'Delivery Scope',
+        password: 'delivery-scope-secret',
+        roleId: role.id,
+      );
+      await security.setUserScopes(user.id, [
+        UserScope(
+          id: 'delivery-scope-$suffix',
+          userId: user.id,
+          type: ScopeType.warehouse,
+          scopeId: otherWarehouseId,
+        ),
+      ]);
+      security.logout();
+      await security.login(user.username, 'delivery-scope-secret');
+      await expectLater(
+        dataSource.postDelivery(
+          order: value,
+          operationId: 'operation-inactive-warehouse-$suffix',
+          warehouseId: warehouseId,
+          deliveryDate: now,
+          items: [requestItem],
+        ),
+        throwsException,
+      );
+      expect(await deliveryMutationState(value.id), beforeReplay);
+      security.logout();
+      await security.login('admin', 'Furnexa-Test-Admin-2026!');
+
+      await expectLater(
+        dataSource.postDelivery(
+          order: value,
+          operationId: 'operation-inactive-warehouse-$suffix',
+          warehouseId: warehouseId,
+          deliveryDate: now,
+          items: [
+            SalesItem(
+              id: requestItem.id,
+              itemId: requestItem.itemId,
+              itemType: requestItem.itemType,
+              quantity: 11,
+              unitId: requestItem.unitId,
+            ),
+          ],
+        ),
+        throwsException,
+      );
+      await expectLater(
+        dataSource.postDelivery(
+          order: value,
+          operationId: 'new-operation-inactive-warehouse-$suffix',
+          warehouseId: warehouseId,
+          deliveryDate: now,
+          items: [requestItem],
+        ),
+        throwsA(
+          isA<SalesDeliveryException>().having(
+            (error) => error.failure,
+            'failure',
+            SalesDeliveryFailure.warehouseUnavailable,
+          ),
+        ),
+      );
+      expect(await deliveryMutationState(value.id), beforeReplay);
     },
   );
 
@@ -1112,66 +1478,14 @@ void main() {
   );
 
   test(
-    'delivery journal failure rolls back stock valuation and order updates',
+    'delivery stock-out failure rolls back stock and order updates',
     () async {
       final value = order('journal-failure-delivery-$suffix');
       await dataSource.saveOrder(value);
       await seedProductValuation();
-      final beforeDelivery = await deliveryMutationState(value.id);
-      final db = await FurnexaDatabase.instance.database;
-      await db.execute('''
-      CREATE TRIGGER fail_sales_delivery_journal_insert
-      BEFORE INSERT ON journal_entries
-      WHEN NEW.referenceType = 'SALES_DELIVERY'
-      BEGIN
-        SELECT RAISE(ABORT, 'injected sales delivery journal failure');
-      END
-    ''');
-      try {
-        await expectLater(
-          dataSource.postDelivery(
-            order: value,
-            operationId: 'journal-failure-operation-$suffix',
-            warehouseId: warehouseId,
-            deliveryDate: now,
-            items: [
-              SalesItem(
-                id: value.items.single.id,
-                itemId: productId,
-                itemType: SalesItemType.product,
-                quantity: 10,
-                unitId: unitId,
-              ),
-            ],
-          ),
-          throwsA(
-            predicate(
-              (error) => error.toString().contains(
-                'injected sales delivery journal failure',
-              ),
-            ),
-          ),
-        );
-      } finally {
-        await db.execute(
-          'DROP TRIGGER IF EXISTS fail_sales_delivery_journal_insert',
-        );
-      }
-
-      expect(await deliveryMutationState(value.id), beforeDelivery);
-    },
-  );
-
-  test('delivery rolls back when valuation quantity is insufficient', () async {
-    final value = order('valuation-insufficient-$suffix');
-    await dataSource.saveOrder(value);
-    await seedProductValuation(quantity: 5);
-    final beforeDelivery = await deliveryMutationState(value.id);
-
-    await expectLater(
-      dataSource.postDelivery(
+      final delivery = await dataSource.postDelivery(
         order: value,
-        operationId: 'valuation-insufficient-operation-$suffix',
+        operationId: 'journal-failure-operation-$suffix',
         warehouseId: warehouseId,
         deliveryDate: now,
         items: [
@@ -1183,11 +1497,87 @@ void main() {
             unitId: unitId,
           ),
         ],
-      ),
-      throwsException,
+      );
+      await dataSource.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.dispatched,
+      );
+      await dataSource.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.inTransit,
+      );
+      final beforeDelivery = await deliveryMutationState(value.id);
+      final db = await FurnexaDatabase.instance.database;
+      await db.execute('''
+      CREATE TRIGGER fail_sales_delivery_stock_out
+      BEFORE INSERT ON stock_transactions
+      WHEN NEW.transactionType = 'STOCK_OUT'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected sales delivery stock-out failure');
+      END
+    ''');
+      try {
+        await expectLater(
+          dataSource.updateDeliveryDispatch(
+            deliveryId: delivery.id,
+            status: DeliveryDispatchStatus.delivered,
+          ),
+          throwsA(
+            predicate(
+              (error) => error.toString().contains(
+                'injected sales delivery stock-out failure',
+              ),
+            ),
+          ),
+        );
+      } finally {
+        await db.execute(
+          'DROP TRIGGER IF EXISTS fail_sales_delivery_stock_out',
+        );
+      }
+
+      expect(await deliveryMutationState(value.id), beforeDelivery);
+    },
+  );
+
+  test('delivery completes when inventory valuation is missing', () async {
+    final value = order('valuation-missing-$suffix');
+    await dataSource.saveOrder(value);
+    final delivery = await dataSource.postDelivery(
+      order: value,
+      operationId: 'valuation-missing-operation-$suffix',
+      warehouseId: warehouseId,
+      deliveryDate: now,
+      items: [
+        SalesItem(
+          id: value.items.single.id,
+          itemId: productId,
+          itemType: SalesItemType.product,
+          quantity: 10,
+          unitId: unitId,
+        ),
+      ],
+    );
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.dispatched,
+    );
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.inTransit,
+    );
+    final completed = await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.delivered,
     );
 
-    expect(await deliveryMutationState(value.id), beforeDelivery);
+    final state = await deliveryMutationState(value.id);
+    expect(completed.status, DeliveryDispatchStatus.delivered);
+    expect((state['stockBalances'] as List).single['quantity'], 90);
+    expect(state['valuations'], isEmpty);
+    expect(state['stockTransactions'], hasLength(1));
+    expect((state['orderItems'] as List).single['deliveredQuantity'], 10);
+    expect(state['journalEntries'], isEmpty);
   });
 
   test('delivery rolls back when stock balance is insufficient', () async {
@@ -1226,6 +1616,96 @@ void main() {
   });
 
   test(
+    'delivery reservation is warehouse-scoped and prevents overbooking',
+    () async {
+      final warehouseB = await createSecondaryWarehouse();
+      await seedBaseStock(warehouseB, 20);
+      await seedBaseValuation(warehouseB, quantity: 20, averageCost: 7);
+      final value = order('reservation-warehouse-scope-$suffix');
+      await dataSource.saveOrder(value);
+      await seedProductValuation();
+
+      final first = await dataSource.postDelivery(
+        order: value,
+        operationId: 'reservation-primary-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [
+          SalesItem(
+            id: value.items.single.id,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 40,
+            unitId: unitId,
+          ),
+        ],
+      );
+
+      final primary = await dataSource.deliveryAvailability(
+        warehouseId: warehouseId,
+        orderItem: value.items.single,
+      );
+      final secondary = await dataSource.deliveryAvailability(
+        warehouseId: warehouseB,
+        orderItem: value.items.single,
+      );
+      expect(primary.physicalBaseQuantity, 100);
+      expect(primary.reservedBaseQuantity, 40);
+      expect(primary.availableBaseQuantity, 60);
+      expect(primary.orderReservedBaseQuantity, 40);
+      expect(secondary.physicalBaseQuantity, 20);
+      expect(secondary.reservedBaseQuantity, 0);
+      expect(secondary.availableBaseQuantity, 20);
+
+      final second = await dataSource.postDelivery(
+        order: value,
+        operationId: 'reservation-secondary-$suffix',
+        warehouseId: warehouseB,
+        deliveryDate: now,
+        items: [
+          SalesItem(
+            id: value.items.single.id,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 20,
+            unitId: unitId,
+          ),
+        ],
+      );
+      expect(second.warehouseId, warehouseB);
+      final secondaryAfterReservation = await dataSource.deliveryAvailability(
+        warehouseId: warehouseB,
+        orderItem: value.items.single,
+      );
+      expect(secondaryAfterReservation.reservedBaseQuantity, 20);
+      expect(secondaryAfterReservation.orderReservedBaseQuantity, 60);
+
+      await seedBaseStock(warehouseId, 45);
+      final beforeRejectedReservation = await deliveryMutationState(value.id);
+      await expectLater(
+        dataSource.postDelivery(
+          order: value,
+          operationId: 'reservation-overbook-$suffix',
+          warehouseId: warehouseId,
+          deliveryDate: now,
+          items: [
+            SalesItem(
+              id: value.items.single.id,
+              itemId: productId,
+              itemType: SalesItemType.product,
+              quantity: 10,
+              unitId: unitId,
+            ),
+          ],
+        ),
+        throwsA(isA<SalesDeliveryException>()),
+      );
+      expect(await deliveryMutationState(value.id), beforeRejectedReservation);
+      expect(first.status, DeliveryDispatchStatus.pending);
+    },
+  );
+
+  test(
     'sales delivery rejects a restricted warehouse without mutations',
     () async {
       final value = order('restricted-delivery-$suffix');
@@ -1256,101 +1736,178 @@ void main() {
             ),
           ],
         ),
-        throwsA(predicate((error) => error.toString().contains('QUARANTINE'))),
+        throwsA(
+          isA<SalesDeliveryException>().having(
+            (error) => error.failure,
+            'failure',
+            SalesDeliveryFailure.warehouseUnavailable,
+          ),
+        ),
       );
 
       expect(await deliveryMutationState(value.id), before);
     },
   );
 
-  test('delivery posts persisted balanced revenue and COGS lines', () async {
-    final value = order('accounting-$suffix');
-    await dataSource.saveOrder(value);
-    await seedProductValuation();
-    await dataSource.postDelivery(
-      order: value,
-      operationId: 'accounting-delivery-$suffix',
-      warehouseId: warehouseId,
-      deliveryDate: now,
-      items: [
-        SalesItem(
-          id: value.items.single.id,
-          itemId: productId,
-          itemType: SalesItemType.product,
-          quantity: 10,
-          unitId: unitId,
+  test(
+    'inactive and non-sellable warehouses are not delivery sources',
+    () async {
+      final db = await FurnexaDatabase.instance.database;
+      final secondary = await createSecondaryWarehouse();
+      await db.update(
+        'warehouses',
+        {'purpose': 'QUARANTINE'},
+        where: 'id = ?',
+        whereArgs: [secondary],
+      );
+      await db.update(
+        'warehouses',
+        {'state': 'inactive'},
+        where: 'id = ?',
+        whereArgs: [warehouseId],
+      );
+      final eligible = await dataSource.activeWarehouses();
+      expect(
+        eligible.map((warehouse) => warehouse.id),
+        isNot(contains(secondary)),
+      );
+      expect(
+        eligible.map((warehouse) => warehouse.id),
+        isNot(contains(warehouseId)),
+      );
+    },
+  );
+
+  test(
+    'delivery confirmation posts stock out without accounting entries',
+    () async {
+      final value = order('accounting-$suffix');
+      await dataSource.saveOrder(value);
+      await seedProductValuation();
+      final delivery = await dataSource.postDelivery(
+        order: value,
+        operationId: 'accounting-delivery-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [
+          SalesItem(
+            id: value.items.single.id,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 10,
+            unitId: unitId,
+          ),
+        ],
+      );
+
+      final db = await FurnexaDatabase.instance.database;
+      expect(await db.query('journal_entries'), isEmpty);
+      expect((await db.query('stock_balances')).single['quantity'], 100);
+      await completeDelivery(delivery);
+      final journals = await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_DELIVERY', delivery.id],
+      );
+      expect(journals, isEmpty);
+      final stock = await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      );
+      final valuation = await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      );
+      expect((stock.single['quantity'] as num).toDouble(), 90);
+      expect((valuation.single['quantity'] as num).toDouble(), 100);
+      expect((valuation.single['averageCost'] as num).toDouble(), 5);
+      expect(
+        await db.query(
+          'stock_transactions',
+          where: 'reference = ?',
+          whereArgs: [delivery.deliveryNumber],
         ),
-      ],
-    );
+        hasLength(1),
+      );
+      expect(
+        (await db.query('sales_order_items')).single['deliveredQuantity'],
+        10,
+      );
+      final invoiceEntries = await db.query(
+        'journal_entries',
+        where: 'referenceType = ?',
+        whereArgs: ['SALES_INVOICE'],
+      );
+      expect(invoiceEntries, isEmpty);
+    },
+  );
 
-    final db = await FurnexaDatabase.instance.database;
-    final delivery = (await dataSource.deliveries(value.id)).single;
-    final journals = await db.query(
-      'journal_entries',
-      where: 'referenceType = ? AND referenceId = ?',
-      whereArgs: ['SALES_DELIVERY', delivery.id],
-    );
-    expect(journals, hasLength(1));
-    final journalParties = await db.query(
-      'journal_parties',
-      where: 'journalEntryId = ?',
-      whereArgs: [journals.single['id']],
-    );
-    expect(journalParties, hasLength(1));
-    expect(journalParties.single['partyType'], 'CUSTOMER');
-    expect(journalParties.single['partyId'], customerId);
-    final persistedLines = await db.rawQuery(
-      '''
-      SELECT a.code AS accountCode, jl.debit, jl.credit
-      FROM journal_lines jl
-      JOIN accounts a ON a.id = jl.accountId
-      WHERE jl.journalEntryId = ?
-      ''',
-      [journals.single['id']],
-    );
-    expect(persistedLines, hasLength(4));
+  test(
+    'delivery confirmation needs physical stock but no valuation record',
+    () async {
+      final value = order('no-valuation-delivery-$suffix');
+      await dataSource.saveOrder(value);
+      final delivery = await dataSource.postDelivery(
+        order: value,
+        operationId: 'no-valuation-delivery-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [
+          SalesItem(
+            id: value.items.single.id,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 10,
+            unitId: unitId,
+          ),
+        ],
+      );
 
-    final receivable = persistedLines.singleWhere(
-      (line) => line['accountCode'] == '1200',
-    );
-    final revenue = persistedLines.singleWhere(
-      (line) => line['accountCode'] == '4000',
-    );
-    final cogs = persistedLines.singleWhere(
-      (line) => line['accountCode'] == '5000',
-    );
-    final inventory = persistedLines.singleWhere(
-      (line) => line['accountCode'] == '1100',
-    );
-    expect((receivable['debit'] as num).toDouble(), closeTo(10, 0.000001));
-    expect((revenue['credit'] as num).toDouble(), closeTo(10, 0.000001));
-    expect((cogs['debit'] as num).toDouble(), closeTo(50, 0.000001));
-    expect((inventory['credit'] as num).toDouble(), closeTo(50, 0.000001));
-    final totalDebits = persistedLines.fold<double>(
-      0,
-      (sum, line) => sum + (line['debit'] as num).toDouble(),
-    );
-    final totalCredits = persistedLines.fold<double>(
-      0,
-      (sum, line) => sum + (line['credit'] as num).toDouble(),
-    );
-    expect(totalDebits, closeTo(60, 0.000001));
-    expect(totalCredits, closeTo(60, 0.000001));
-    expect(totalDebits, closeTo(totalCredits, 0.000001));
-    final stock = await db.query(
-      'stock_balances',
-      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, productId, 'PRODUCT'],
-    );
-    final valuation = await db.query(
-      'inventory_valuations',
-      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, productId, 'PRODUCT'],
-    );
-    expect((stock.single['quantity'] as num).toDouble(), 90);
-    expect((valuation.single['quantity'] as num).toDouble(), 90);
-    expect((valuation.single['averageCost'] as num).toDouble(), 5);
-  });
+      final db = await FurnexaDatabase.instance.database;
+      expect(await db.query('inventory_valuations'), isEmpty);
+      await completeDelivery(delivery);
+      await dataSource.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.delivered,
+      );
+
+      expect(
+        (await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+          whereArgs: [warehouseId, productId, 'PRODUCT'],
+        )).single['quantity'],
+        90,
+      );
+      expect(
+        await db.query(
+          'stock_transactions',
+          where: 'reference = ?',
+          whereArgs: [delivery.deliveryNumber],
+        ),
+        hasLength(1),
+      );
+      expect(
+        (await db.query(
+          'sales_order_items',
+          where: 'salesOrderId = ?',
+          whereArgs: [value.id],
+        )).single['deliveredQuantity'],
+        10,
+      );
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ? AND referenceId = ?',
+          whereArgs: ['SALES_DELIVERY', delivery.id],
+        ),
+        isEmpty,
+      );
+      expect(await db.query('inventory_valuations'), isEmpty);
+    },
+  );
 
   test('delivery consumes only the requested variant identity', () async {
     final db = await FurnexaDatabase.instance.database;
@@ -1448,13 +2005,7 @@ void main() {
       where: 'salesOrderId = ?',
       whereArgs: [value.id],
     );
-    final deliveryJournalCountBefore = await db.query(
-      'journal_entries',
-      where: 'referenceType = ?',
-      whereArgs: ['SALES_DELIVERY'],
-    );
-
-    await dataSource.postDelivery(
+    final delivery = await dataSource.postDelivery(
       order: value,
       operationId: 'variant-isolation-delivery-$suffix',
       warehouseId: warehouseId,
@@ -1473,6 +2024,7 @@ void main() {
         ),
       ],
     );
+    await completeDelivery(delivery);
 
     final variantABalance = (await db.query(
       'stock_balances',
@@ -1492,12 +2044,12 @@ void main() {
       80,
     );
     expect((variantABalance['quantity'] as num).toDouble(), 16);
-    expect((variantAValuation['quantity'] as num).toDouble(), 16);
+    expect((variantAValuation['quantity'] as num).toDouble(), 20);
     expect((variantAValuation['averageCost'] as num).toDouble(), 4);
     expect(
       (variantAValuation['quantity'] as num).toDouble() *
           (variantAValuation['averageCost'] as num).toDouble(),
-      64,
+      80,
     );
     expect(
       (await db.query(
@@ -1524,12 +2076,12 @@ void main() {
       baseBalanceBefore,
     );
 
-    final delivery = (await db.query(
+    final deliveryRow = (await db.query(
       'sales_deliveries',
       where: 'salesOrderId = ?',
       whereArgs: [value.id],
     )).single;
-    expect(delivery['warehouseId'], warehouseId);
+    expect(deliveryRow['warehouseId'], warehouseId);
     expect(
       await db.query(
         'sales_deliveries',
@@ -1541,7 +2093,7 @@ void main() {
     final deliveryLine = (await db.query(
       'sales_delivery_items',
       where: 'salesDeliveryId = ?',
-      whereArgs: [delivery['id']],
+      whereArgs: [deliveryRow['id']],
     )).single;
     expect(deliveryLine['salesOrderItemId'], 'variant-isolation-a-$suffix');
     expect(deliveryLine['productId'], productId);
@@ -1551,7 +2103,7 @@ void main() {
     final stockTransactions = await db.query(
       'stock_transactions',
       where: 'reference = ?',
-      whereArgs: [delivery['deliveryNumber']],
+      whereArgs: [deliveryRow['deliveryNumber']],
     );
     expect(stockTransactions, hasLength(1));
     expect(stockTransactions.single['warehouseId'], warehouseId);
@@ -1584,28 +2136,13 @@ void main() {
       )).single['status'],
       'PARTIALLY_DELIVERED',
     );
-    final journals = await db.query(
-      'journal_entries',
-      where: 'referenceType = ?',
-      whereArgs: ['SALES_DELIVERY'],
-    );
-    expect(journals, hasLength(deliveryJournalCountBefore.length + 1));
-    expect(journals.single['referenceId'], delivery['id']);
     expect(
       await db.query(
         'journal_entries',
         where: 'referenceType = ? AND referenceId = ?',
-        whereArgs: ['SALES_DELIVERY', delivery['id']],
+        whereArgs: ['SALES_DELIVERY', deliveryRow['id']],
       ),
-      hasLength(1),
-    );
-    expect(
-      await db.query(
-        'journal_lines',
-        where: 'journalEntryId = ?',
-        whereArgs: [journals.single['id']],
-      ),
-      hasLength(4),
+      isEmpty,
     );
   });
 
@@ -1644,7 +2181,7 @@ void main() {
       whereArgs: [warehouseB, productId, 'PRODUCT'],
     )).single;
 
-    await dataSource.postDelivery(
+    final delivery = await dataSource.postDelivery(
       order: value,
       operationId: 'warehouse-isolation-delivery-$suffix',
       warehouseId: warehouseId,
@@ -1659,6 +2196,7 @@ void main() {
         ),
       ],
     );
+    await completeDelivery(delivery);
 
     final warehouseABalance = (await db.query(
       'stock_balances',
@@ -1679,12 +2217,12 @@ void main() {
     );
     expect((orderLineBefore['deliveredQuantity'] as num).toDouble(), 0);
     expect((warehouseABalance['quantity'] as num).toDouble(), 7);
-    expect((warehouseAValuation['quantity'] as num).toDouble(), 7);
+    expect((warehouseAValuation['quantity'] as num).toDouble(), 12);
     expect((warehouseAValuation['averageCost'] as num).toDouble(), 3);
     expect(
       (warehouseAValuation['quantity'] as num).toDouble() *
           (warehouseAValuation['averageCost'] as num).toDouble(),
-      21,
+      36,
     );
     expect(
       (await db.query(
@@ -1702,16 +2240,16 @@ void main() {
       )).single,
       warehouseBValuationBefore,
     );
-    final delivery = (await db.query(
+    final deliveryRow = (await db.query(
       'sales_deliveries',
       where: 'salesOrderId = ?',
       whereArgs: [value.id],
     )).single;
-    expect(delivery['warehouseId'], warehouseId);
+    expect(deliveryRow['warehouseId'], warehouseId);
     final deliveryLine = (await db.query(
       'sales_delivery_items',
       where: 'salesDeliveryId = ?',
-      whereArgs: [delivery['id']],
+      whereArgs: [deliveryRow['id']],
     )).single;
     expect(deliveryLine['productId'], productId);
     expect(deliveryLine['variantId'], isNull);
@@ -1719,7 +2257,7 @@ void main() {
     final stockTransactions = await db.query(
       'stock_transactions',
       where: 'reference = ?',
-      whereArgs: [delivery['deliveryNumber']],
+      whereArgs: [deliveryRow['deliveryNumber']],
     );
     expect(stockTransactions, hasLength(1));
     expect(stockTransactions.single['warehouseId'], warehouseId);
@@ -1810,35 +2348,67 @@ void main() {
     expect(await deliveryIdentityMutationState(value.id), before);
   });
 
-  test('delivery cannot borrow valuation from another warehouse', () async {
+  test('delivery does not consume valuation in another warehouse', () async {
+    final db = await FurnexaDatabase.instance.database;
     final warehouseB = await createSecondaryWarehouse();
     await seedBaseStock(warehouseId, 20);
     await seedBaseStock(warehouseB, 20);
     await seedBaseValuation(warehouseB, quantity: 20, averageCost: 7);
     final value = order('warehouse-valuation-mismatch-$suffix');
     await dataSource.saveOrder(value);
-    final before = await deliveryIdentityMutationState(value.id);
-
-    await expectLater(
-      dataSource.postDelivery(
-        order: value,
-        operationId: 'warehouse-valuation-mismatch-$suffix',
-        warehouseId: warehouseId,
-        deliveryDate: now,
-        items: [
-          SalesItem(
-            id: value.items.single.id,
-            itemId: productId,
-            itemType: SalesItemType.product,
-            quantity: 5,
-            unitId: unitId,
-          ),
-        ],
-      ),
-      throwsException,
+    final delivery = await dataSource.postDelivery(
+      order: value,
+      operationId: 'warehouse-valuation-mismatch-$suffix',
+      warehouseId: warehouseId,
+      deliveryDate: now,
+      items: [
+        SalesItem(
+          id: value.items.single.id,
+          itemId: productId,
+          itemType: SalesItemType.product,
+          quantity: 5,
+          unitId: unitId,
+        ),
+      ],
+    );
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.dispatched,
+    );
+    await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.inTransit,
+    );
+    final completed = await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.delivered,
     );
 
-    expect(await deliveryIdentityMutationState(value.id), before);
+    expect(completed.status, DeliveryDispatchStatus.delivered);
+    expect(
+      (await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      )).single['quantity'],
+      15,
+    );
+    expect(
+      (await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseB, productId, 'PRODUCT'],
+      )).single['quantity'],
+      20,
+    );
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_DELIVERY', delivery.id],
+      ),
+      isEmpty,
+    );
   });
 
   test('delivery cannot borrow stock from another warehouse', () async {
@@ -1873,7 +2443,7 @@ void main() {
     expect(await deliveryIdentityMutationState(value.id), before);
   });
 
-  test('zero-revenue delivery still posts positive COGS', () async {
+  test('zero-revenue delivery posts stock out without accounting', () async {
     final value = SalesOrder(
       id: 'zero-revenue-$suffix',
       orderNumber: 'SO-ZERO-$suffix',
@@ -1900,7 +2470,7 @@ void main() {
     );
     await dataSource.saveOrder(value);
     await seedProductValuation();
-    await dataSource.postDelivery(
+    final delivery = await dataSource.postDelivery(
       order: value,
       operationId: 'zero-revenue-delivery-$suffix',
       warehouseId: warehouseId,
@@ -1915,39 +2485,18 @@ void main() {
         ),
       ],
     );
+    await completeDelivery(delivery);
 
     final db = await FurnexaDatabase.instance.database;
-    final delivery = (await dataSource.deliveries(value.id)).single;
     final journals = await db.query(
       'journal_entries',
       where: 'referenceType = ? AND referenceId = ?',
       whereArgs: ['SALES_DELIVERY', delivery.id],
     );
-    expect(journals, hasLength(1));
-    final lines = await db.rawQuery(
-      '''
-      SELECT a.code AS accountCode, jl.debit, jl.credit
-      FROM journal_lines jl
-      JOIN accounts a ON a.id = jl.accountId
-      WHERE jl.journalEntryId = ?
-      ''',
-      [journals.single['id']],
-    );
-    expect(lines, hasLength(2));
-    final cogs = lines.singleWhere((line) => line['accountCode'] == '5000');
-    final inventory = lines.singleWhere(
-      (line) => line['accountCode'] == '1100',
-    );
-    expect((cogs['debit'] as num).toDouble(), closeTo(15, 0.000001));
-    expect((inventory['credit'] as num).toDouble(), closeTo(15, 0.000001));
-    expect(
-      lines.fold<double>(0, (sum, line) => sum + (line['debit'] as num)),
-      closeTo(15, 0.000001),
-    );
-    expect(
-      lines.fold<double>(0, (sum, line) => sum + (line['credit'] as num)),
-      closeTo(15, 0.000001),
-    );
+    expect(journals, isEmpty);
+    expect((await db.query('stock_balances')).single['quantity'], 97);
+    expect((await db.query('inventory_valuations')).single['quantity'], 100);
+    expect(await db.query('stock_transactions'), hasLength(1));
   });
 
   test(
@@ -2461,7 +3010,8 @@ void main() {
         where: 'id = ?',
         whereArgs: [value.id],
       );
-      expect(persisted.single['status'], 'PARTIALLY_DELIVERED');
+      expect(persisted.single['status'], 'CONFIRMED');
+      expect((persistedLines.single['deliveredQuantity'] as num).toDouble(), 0);
       expect(await dataSource.deliveries(value.id), hasLength(1));
       expect(
         (await (await FurnexaDatabase.instance.database).query(
@@ -2573,11 +3123,11 @@ void main() {
     },
   );
 
-  test('partial cancellation preserves posted delivery history', () async {
+  test('pending delivery cancellation releases reservation only', () async {
     final value = order('partial-cancel-$suffix');
     await dataSource.saveOrder(value);
     await seedProductValuation();
-    await dataSource.postDelivery(
+    final delivery = await dataSource.postDelivery(
       order: value,
       operationId: 'partial-cancel-delivery-$suffix',
       warehouseId: warehouseId,
@@ -2593,119 +3143,92 @@ void main() {
       ],
     );
     final db = await FurnexaDatabase.instance.database;
-    final delivery = (await db.query(
-      'sales_deliveries',
-      where: 'salesOrderId = ?',
-      whereArgs: [value.id],
-    )).single;
-    final deliveryItemsBefore = await db.query(
-      'sales_delivery_items',
-      where: 'salesDeliveryId = ?',
-      whereArgs: [delivery['id']],
-    );
-    final stockTransactionsBefore = await db.query(
-      'stock_transactions',
-      where: 'reference = ?',
-      whereArgs: [delivery['deliveryNumber']],
-    );
-    final stockBalancesBefore = await db.query(
-      'stock_balances',
-      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, productId, 'PRODUCT'],
-    );
-    final valuationBefore = await db.query(
+    final stockBefore = (await db.query('stock_balances')).single['quantity'];
+    final valuationBefore = (await db.query(
       'inventory_valuations',
-      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-      whereArgs: [warehouseId, productId, 'PRODUCT'],
-    );
-    final journalsBefore = await db.query(
-      'journal_entries',
-      where: 'referenceType = ? AND referenceId = ?',
-      whereArgs: ['SALES_DELIVERY', delivery['id']],
-    );
-    final journalLinesBefore = await db.query(
-      'journal_lines',
-      where:
-          'journalEntryId IN (SELECT id FROM journal_entries WHERE referenceType = ? AND referenceId = ?)',
-      whereArgs: ['SALES_DELIVERY', delivery['id']],
+    )).single['quantity'];
+
+    final cancelled = await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.cancelled,
     );
 
-    await dataSource.changeOrderStatus(value.id, SalesOrderStatus.cancelled);
-
-    await expectLater(
-      dataSource.updateDeliveryDispatch(
-        deliveryId: delivery['id'] as String,
-        status: DeliveryDispatchStatus.dispatched,
-      ),
-      throwsException,
-    );
-
+    expect(cancelled.status, DeliveryDispatchStatus.cancelled);
+    expect((await db.query('sales_deliveries')).single['inventoryPosted'], 0);
+    expect((await db.query('stock_balances')).single['quantity'], stockBefore);
     expect(
-      (await db.query(
-        'sales_orders',
-        where: 'id = ?',
-        whereArgs: [value.id],
-      )).single['status'],
-      'CANCELLED',
-    );
-    expect(
-      await db.query(
-        'sales_deliveries',
-        where: 'salesOrderId = ?',
-        whereArgs: [value.id],
-      ),
-      [delivery],
-    );
-    expect(
-      await db.query(
-        'sales_delivery_items',
-        where: 'salesDeliveryId = ?',
-        whereArgs: [delivery['id']],
-      ),
-      deliveryItemsBefore,
-    );
-    expect(
-      await db.query(
-        'stock_transactions',
-        where: 'reference = ?',
-        whereArgs: [delivery['deliveryNumber']],
-      ),
-      stockTransactionsBefore,
-    );
-    expect(
-      await db.query(
-        'stock_balances',
-        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-        whereArgs: [warehouseId, productId, 'PRODUCT'],
-      ),
-      stockBalancesBefore,
-    );
-    expect(
-      await db.query(
-        'inventory_valuations',
-        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-        whereArgs: [warehouseId, productId, 'PRODUCT'],
-      ),
+      (await db.query('inventory_valuations')).single['quantity'],
       valuationBefore,
     );
+    expect(await db.query('stock_transactions'), isEmpty);
+    expect(await db.query('journal_entries'), isEmpty);
     expect(
-      await db.query(
-        'journal_entries',
-        where: 'referenceType = ? AND referenceId = ?',
-        whereArgs: ['SALES_DELIVERY', delivery['id']],
-      ),
-      journalsBefore,
+      (await db.query('sales_order_items')).single['deliveredQuantity'],
+      0,
     );
     expect(
-      await db.query(
-        'journal_lines',
-        where:
-            'journalEntryId IN (SELECT id FROM journal_entries WHERE referenceType = ? AND referenceId = ?)',
-        whereArgs: ['SALES_DELIVERY', delivery['id']],
-      ),
-      journalLinesBefore,
+      (await dataSource.deliveryAvailability(
+        warehouseId: warehouseId,
+        orderItem: value.items.single,
+      )).availableBaseQuantity,
+      100,
     );
   });
+
+  test(
+    'dispatched delivery cannot be cancelled or release its reservation',
+    () async {
+      final value = order('dispatched-cancel-$suffix');
+      await dataSource.saveOrder(value);
+      await seedProductValuation();
+      final delivery = await dataSource.postDelivery(
+        order: value,
+        operationId: 'dispatched-cancel-delivery-$suffix',
+        warehouseId: warehouseId,
+        deliveryDate: now,
+        items: [
+          SalesItem(
+            id: value.items.single.id,
+            itemId: productId,
+            itemType: SalesItemType.product,
+            quantity: 10,
+            unitId: unitId,
+          ),
+        ],
+      );
+      await dataSource.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.dispatched,
+      );
+      final before = await deliveryMutationState(value.id);
+
+      await expectLater(
+        dataSource.updateDeliveryDispatch(
+          deliveryId: delivery.id,
+          status: DeliveryDispatchStatus.cancelled,
+        ),
+        throwsA(
+          isA<SalesDeliveryException>().having(
+            (error) => error.failure,
+            'failure',
+            SalesDeliveryFailure.cancellationAfterDispatch,
+          ),
+        ),
+      );
+      await expectLater(
+        dataSource.changeOrderStatus(value.id, SalesOrderStatus.cancelled),
+        throwsA(isA<SalesDeliveryException>()),
+      );
+      expect(await deliveryMutationState(value.id), before);
+      expect(
+        (await dataSource.deliveryAvailability(
+          warehouseId: warehouseId,
+          orderItem: value.items.single,
+        )).availableBaseQuantity,
+        90,
+      );
+    },
+  );
 
   test(
     'delivery rejects order quantity drift without posting writes',
@@ -2801,7 +3324,7 @@ void main() {
       final value = order('delivery-$suffix');
       await dataSource.saveOrder(value);
       await seedProductValuation();
-      await dataSource.postDelivery(
+      final firstDelivery = await dataSource.postDelivery(
         order: value,
         operationId: 'partial-full-first-$suffix',
         warehouseId: warehouseId,
@@ -2839,12 +3362,36 @@ void main() {
         whereArgs: [warehouseId, productId],
         limit: 1,
       );
-      expect((balance.single['quantity'] as num).toDouble(), 40);
+      expect((balance.single['quantity'] as num).toDouble(), 100);
+      expect(
+        (await database.query(
+          'sales_order_items',
+          where: 'salesOrderId = ?',
+          whereArgs: [value.id],
+        )).single['deliveredQuantity'],
+        0,
+      );
+      expect(
+        (await dataSource.deliveryAvailability(
+          warehouseId: warehouseId,
+          orderItem: value.items.single,
+        )).availableBaseQuantity,
+        40,
+      );
+      await completeDelivery(firstDelivery);
+      expect(
+        (await database.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [warehouseId, productId],
+        )).single['quantity'],
+        40,
+      );
       final partial = (await dataSource.orders()).firstWhere(
         (v) => v.id == value.id,
       );
       expect(partial.status, SalesOrderStatus.partiallyDelivered);
-      await dataSource.postDelivery(
+      final finalDelivery = await dataSource.postDelivery(
         order: partial,
         operationId: 'partial-full-final-$suffix',
         warehouseId: warehouseId,
@@ -2859,6 +3406,15 @@ void main() {
           ),
         ],
       );
+      expect(
+        (await database.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [warehouseId, productId],
+        )).single['quantity'],
+        40,
+      );
+      await completeDelivery(finalDelivery);
       expect(
         (await dataSource.orders()).firstWhere((v) => v.id == value.id).status,
         SalesOrderStatus.fullyDelivered,
@@ -2987,17 +3543,6 @@ void main() {
 
     final delivery = (await dataSource.deliveries(value.id)).single;
     expect(delivery.status, DeliveryDispatchStatus.pending);
-    await expectLater(
-      dataSource.updateDeliveryDispatch(
-        deliveryId: delivery.id,
-        status: DeliveryDispatchStatus.cancelled,
-      ),
-      throwsException,
-    );
-    expect(
-      (await dataSource.deliveries(value.id)).single.status,
-      DeliveryDispatchStatus.pending,
-    );
 
     final dispatched = await dataSource.updateDeliveryDispatch(
       deliveryId: delivery.id,
@@ -3015,12 +3560,45 @@ void main() {
       status: DeliveryDispatchStatus.inTransit,
     );
     expect(inTransit.status, DeliveryDispatchStatus.inTransit);
+    final db = await FurnexaDatabase.instance.database;
+    expect((await db.query('stock_balances')).single['quantity'], 100);
+    expect((await db.query('inventory_valuations')).single['quantity'], 100);
+    expect(await db.query('stock_transactions'), isEmpty);
+    expect(
+      (await dataSource.deliveryAvailability(
+        warehouseId: warehouseId,
+        orderItem: value.items.single,
+      )).availableBaseQuantity,
+      70,
+    );
 
     final delivered = await dataSource.updateDeliveryDispatch(
       deliveryId: delivery.id,
       status: DeliveryDispatchStatus.delivered,
     );
     expect(delivered.status, DeliveryDispatchStatus.delivered);
+    expect((await db.query('stock_balances')).single['quantity'], 70);
+    expect((await db.query('inventory_valuations')).single['quantity'], 100);
+    expect(await db.query('stock_transactions'), hasLength(1));
+    expect(
+      (await db.query('sales_order_items')).single['deliveredQuantity'],
+      30,
+    );
+    final replayedConfirmation = await dataSource.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.delivered,
+    );
+    expect(replayedConfirmation.status, DeliveryDispatchStatus.delivered);
+    expect((await db.query('stock_balances')).single['quantity'], 70);
+    expect(await db.query('stock_transactions'), hasLength(1));
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_DELIVERY', delivery.id],
+      ),
+      isEmpty,
+    );
     expect(
       () => dataSource.updateDeliveryDispatch(
         deliveryId: delivery.id,

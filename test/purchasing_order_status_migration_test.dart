@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:furnexa/core/constants/app_constants.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -58,7 +57,6 @@ void main() {
         (await db.rawQuery('PRAGMA user_version')).single['user_version'],
         30,
       );
-      expect(AppConstants.databaseVersion, 30);
       for (final entry in before.entries) {
         expect(
           (await db.rawQuery(

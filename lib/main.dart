@@ -30,6 +30,8 @@ import 'package:furnexa/features/notifications/presentation/widgets/notification
 import 'package:furnexa/features/production/presentation/pages/production_page.dart';
 import 'package:furnexa/features/purchasing/presentation/pages/purchasing_page.dart';
 import 'package:furnexa/features/raw_materials_products/presentation/pages/raw_materials_products_page.dart';
+import 'package:furnexa/features/returns_quality/presentation/pages/sales_returns_page.dart';
+import 'package:furnexa/features/returns_quality/presentation/pages/purchase_returns_page.dart';
 import 'package:furnexa/features/sales/presentation/pages/sales_page.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 import 'package:furnexa/features/users_roles_permissions/presentation/pages/login_page.dart';
@@ -277,7 +279,8 @@ class _AppHomeState extends State<_AppHome> {
         GlobalSearchEntityType.customer ||
         GlobalSearchEntityType.salesOrder => 5,
         GlobalSearchEntityType.productionOrder ||
-        GlobalSearchEntityType.productionStage => 6,
+        GlobalSearchEntityType.productionStage =>
+          widget.security.can('PRODUCTION_VIEW') ? 6 : _index,
         GlobalSearchEntityType.worker => 7,
         GlobalSearchEntityType.warehouse => 3,
         GlobalSearchEntityType.section || GlobalSearchEntityType.workshop => 1,
@@ -290,7 +293,8 @@ class _AppHomeState extends State<_AppHome> {
       GlobalSearchEntityCategory.products => 2,
       GlobalSearchEntityCategory.customers ||
       GlobalSearchEntityCategory.salesOrders => 5,
-      GlobalSearchEntityCategory.productionOrders => 6,
+      GlobalSearchEntityCategory.productionOrders =>
+        widget.security.can('PRODUCTION_VIEW') ? 6 : _index,
       GlobalSearchEntityCategory.workers => 7,
       GlobalSearchEntityCategory.warehouses => 3,
       GlobalSearchEntityCategory.sections ||
@@ -304,6 +308,7 @@ class _AppHomeState extends State<_AppHome> {
   @override
   Widget build(BuildContext context) {
     final localizations = AppLocalizations.of(context);
+    final canViewProduction = widget.security.can('PRODUCTION_VIEW');
     final pages = [
       DashboardReportsPage(
         security: widget.security,
@@ -352,6 +357,7 @@ class _AppHomeState extends State<_AppHome> {
       ),
       ProductionPage(
         key: ValueKey('production-${_selectedSearchResult?.id}'),
+        security: widget.security,
         initialOrderId:
             _selectedSearchResult?.entityType ==
                 GlobalSearchEntityType.productionOrder
@@ -374,7 +380,7 @@ class _AppHomeState extends State<_AppHome> {
             'warehouse_stock' => 3,
             'purchasing' => 4,
             'sales' => 5,
-            'production' => 6,
+            'production' => canViewProduction ? 6 : _index,
             'hr' => 7,
             'accounting' => 8,
             _ => _index,
@@ -386,6 +392,9 @@ class _AppHomeState extends State<_AppHome> {
         security: widget.security,
         onRestoreCompleted: widget.onLogout,
       ),
+      SalesReturnsPage(security: widget.security),
+      if (widget.security.can('RETURNS_VIEW'))
+        PurchaseReturnsPage(security: widget.security),
     ];
 
     final navItems = [
@@ -419,11 +428,12 @@ class _AppHomeState extends State<_AppHome> {
         icon: Icons.point_of_sale_outlined,
         selectedIcon: Icons.point_of_sale,
       ),
-      FurnexaNavItem(
-        label: localizations.production,
-        icon: Icons.precision_manufacturing_outlined,
-        selectedIcon: Icons.precision_manufacturing,
-      ),
+      if (canViewProduction)
+        FurnexaNavItem(
+          label: localizations.production,
+          icon: Icons.precision_manufacturing_outlined,
+          selectedIcon: Icons.precision_manufacturing,
+        ),
       FurnexaNavItem(
         label: localizations.humanResources,
         icon: Icons.groups_outlined,
@@ -454,12 +464,49 @@ class _AppHomeState extends State<_AppHome> {
         icon: Icons.backup_outlined,
         selectedIcon: Icons.backup,
       ),
+      FurnexaNavItem(
+        label: localizations.salesReturns,
+        icon: Icons.assignment_return_outlined,
+        selectedIcon: Icons.assignment_return,
+      ),
+      if (widget.security.can('RETURNS_VIEW'))
+        FurnexaNavItem(
+          label: localizations.purchaseReturns,
+          icon: Icons.assignment_return_outlined,
+          selectedIcon: Icons.assignment_return,
+        ),
     ];
 
+    final navigationPageIndexes = [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      if (canViewProduction) 6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      if (widget.security.can('RETURNS_VIEW')) 14,
+    ];
+    final pageIndex = !canViewProduction && _index == 6 ? 0 : _index;
+    final requestedNavigationIndex = navigationPageIndexes.indexOf(pageIndex);
+    final selectedNavigationIndex = requestedNavigationIndex < 0
+        ? 0
+        : requestedNavigationIndex;
+
     return FurnexaAppShell(
-      title: pages.isEmpty ? 'Furnexa ERP' : navItems[_index].label,
-      selectedIndex: _index,
-      onDestinationSelected: (value) => setState(() => _index = value),
+      title: pages.isEmpty
+          ? 'Furnexa ERP'
+          : navItems[selectedNavigationIndex].label,
+      selectedIndex: selectedNavigationIndex,
+      onDestinationSelected: (value) =>
+          setState(() => _index = navigationPageIndexes[value]),
       destinations: navItems,
       isSidebarExpanded: _sidebarExpanded,
       onToggleSidebar: () =>
@@ -468,7 +515,10 @@ class _AppHomeState extends State<_AppHome> {
       onToggleLocale: widget.onToggleLocale,
       isDark: widget.themeMode == ThemeMode.dark,
       locale: widget.locale,
-      breadcrumbs: [localizations.home, navItems[_index].label],
+      breadcrumbs: [
+        localizations.home,
+        navItems[selectedNavigationIndex].label,
+      ],
       userName: widget.security.session?.user.displayName,
       userRole: widget.security.session?.role.name,
       onLogout: () {
@@ -498,7 +548,7 @@ class _AppHomeState extends State<_AppHome> {
         onResultSelected: _openSearchResult,
         onViewAll: _openSearchCategory,
       ),
-      body: pages[_index],
+      body: pages[pageIndex],
     );
   }
 }

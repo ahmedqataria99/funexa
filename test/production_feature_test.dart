@@ -3,15 +3,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/production_stage.dart';
+import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/production/data/datasources/production_local_data_source.dart';
 import 'package:furnexa/features/production/data/repositories/production_repository_impl.dart';
 import 'package:furnexa/features/production/domain/entities/production_entities.dart';
 import 'package:furnexa/features/production/domain/repositories/production_repository.dart';
 import 'package:furnexa/features/production/presentation/pages/production_page.dart';
+import 'package:furnexa/features/users_roles_permissions/domain/entities/security_entities.dart';
 import 'package:furnexa/features/raw_materials_products/data/datasources/raw_materials_products_local_data_source.dart';
 import 'package:furnexa/features/raw_materials_products/domain/entities/item_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
+import 'package:furnexa/main.dart' as app;
 import 'test_helpers/database_test_helper.dart';
 
 void main() {
@@ -904,7 +907,14 @@ void main() {
       expect(await db.query('stock_transactions'), transactionsBefore);
       expect(await db.query('production_material_consumptions'), isEmpty);
       expect(await db.query('production_waste'), isEmpty);
-      expect(await dataSource.outputs(order.id), isEmpty);
+      expect(
+        await db.query(
+          'production_outputs',
+          where: 'productionOrderId = ?',
+          whereArgs: [order.id],
+        ),
+        isEmpty,
+      );
       expect(
         await db.query(
           'production_orders',
@@ -1238,6 +1248,165 @@ void main() {
       expect(completed.producedQuantity, 2.5);
       expect(completed.remainingBaseQuantity, 0);
       expect(completed.status, ProductionOrderStatus.completed);
+    },
+  );
+
+  test('production output succeeds in an active SELLABLE warehouse', () async {
+    final order = await inProgressOrder();
+    final db = await FurnexaDatabase.instance.database;
+    await db.update(
+      'warehouses',
+      {'purpose': WarehousePurpose.sellable.value, 'state': 'active'},
+      where: 'id = ?',
+      whereArgs: [warehouseId],
+    );
+    await dataSource.consumeMaterial(
+      orderId: order.id,
+      rawMaterialId: rawMaterialId,
+      warehouseId: warehouseId,
+      quantity: 10,
+      date: now,
+      operationId: 'sellable-output-consumption-$suffix',
+    );
+
+    await dataSource.recordOutput(
+      orderId: order.id,
+      warehouseId: warehouseId,
+      quantity: 1,
+      date: now,
+      operationId: 'sellable-output-$suffix',
+    );
+
+    expect(await dataSource.outputs(order.id), hasLength(1));
+    expect((await dataSource.getOrder(order.id)).producedQuantity, 1);
+  });
+
+  test(
+    'production output accepts only active sellable warehouses atomically',
+    () async {
+      final order = await inProgressOrder();
+      await dataSource.consumeMaterial(
+        orderId: order.id,
+        rawMaterialId: rawMaterialId,
+        warehouseId: warehouseId,
+        quantity: 10,
+        date: now,
+        operationId: 'output-purpose-consumption-$suffix',
+      );
+      final db = await FurnexaDatabase.instance.database;
+      final invalidWarehouses = <(String, WarehousePurpose)>[
+        ('QUARANTINE', WarehousePurpose.quarantine),
+        ('REWORK', WarehousePurpose.rework),
+        ('DAMAGED', WarehousePurpose.damaged),
+      ];
+      for (final (name, purpose) in invalidWarehouses) {
+        await db.insert('warehouses', {
+          'id': 'output-purpose-$name-$suffix',
+          'factoryId': factoryId,
+          'name': 'Output $name $suffix',
+          'code': 'OUT-$name-$suffix',
+          'purpose': purpose.value,
+          'state': 'active',
+          'createdAt': now.millisecondsSinceEpoch,
+          'updatedAt': now.millisecondsSinceEpoch,
+        });
+      }
+      final inactiveSellableId = 'output-purpose-inactive-$suffix';
+      await db.insert('warehouses', {
+        'id': inactiveSellableId,
+        'factoryId': factoryId,
+        'name': 'Inactive Sellable $suffix',
+        'code': 'OUT-INACTIVE-$suffix',
+        'purpose': WarehousePurpose.sellable.value,
+        'state': 'inactive',
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
+
+      expect(
+        (await dataSource.outputWarehouses(order.id)).map((item) => item.id),
+        [warehouseId],
+      );
+
+      final stockBefore = await db.query('stock_balances', orderBy: 'id ASC');
+      final valuationBefore = await db.query(
+        'inventory_valuations',
+        orderBy: 'id ASC',
+      );
+      final transactionsBefore = await db.query(
+        'stock_transactions',
+        orderBy: 'id ASC',
+      );
+      for (final (name, _) in invalidWarehouses) {
+        await expectLater(
+          dataSource.recordOutput(
+            orderId: order.id,
+            warehouseId: 'output-purpose-$name-$suffix',
+            quantity: 1,
+            date: now,
+            operationId: 'output-purpose-$name-$suffix',
+          ),
+          throwsA(
+            predicate(
+              (error) => error.toString().contains('sellable warehouse'),
+            ),
+          ),
+        );
+      }
+      await expectLater(
+        dataSource.recordOutput(
+          orderId: order.id,
+          warehouseId: inactiveSellableId,
+          quantity: 1,
+          date: now,
+          operationId: 'output-purpose-inactive-$suffix',
+        ),
+        throwsException,
+      );
+
+      final security = SecurityLocalDataSource();
+      final role = await security.createRole(
+        name: 'Production Output Warehouse Scope $suffix',
+      );
+      await security.setRolePermissions(role.id, ['PRODUCTION_EDIT']);
+      final user = await security.createUser(
+        username: 'production-output-warehouse-scope-$suffix',
+        displayName: 'Production Output Warehouse Scope',
+        password: 'secret',
+        roleId: role.id,
+      );
+      await security.setUserScopes(user.id, const []);
+      security.logout();
+      await security.login(user.username, 'secret');
+      await expectLater(
+        dataSource.recordOutput(
+          orderId: order.id,
+          warehouseId: warehouseId,
+          quantity: 1,
+          date: now,
+          operationId: 'output-purpose-out-of-scope-$suffix',
+        ),
+        throwsException,
+      );
+
+      expect(await db.query('stock_balances', orderBy: 'id ASC'), stockBefore);
+      expect(
+        await db.query('inventory_valuations', orderBy: 'id ASC'),
+        valuationBefore,
+      );
+      expect(
+        await db.query('stock_transactions', orderBy: 'id ASC'),
+        transactionsBefore,
+      );
+      expect(await dataSource.outputs(order.id), isEmpty);
+      final persistedOrder = await db.query(
+        'production_orders',
+        columns: ['status', 'producedQuantity'],
+        where: 'id = ?',
+        whereArgs: [order.id],
+      );
+      expect(persistedOrder.single['status'], 'IN_PROGRESS');
+      expect(persistedOrder.single['producedQuantity'], 0);
     },
   );
 
@@ -1668,6 +1837,322 @@ void main() {
       ),
       isEmpty,
     );
+  });
+
+  test(
+    'production reads require view while view-only users cannot mutate',
+    () async {
+      final order = await plannedOrder([firstStageId]);
+      final inProgress = await inProgressOrder();
+      final draft = await dataSource.createOrder(
+        productId: productId,
+        plannedQuantity: 1,
+      );
+      final security = SecurityLocalDataSource();
+
+      final noViewRole = await security.createRole(
+        name: 'Production Without View $suffix',
+      );
+      await security.setRolePermissions(noViewRole.id, ['PRODUCTION_EDIT']);
+      final noViewUser = await security.createUser(
+        username: 'production-no-view-$suffix',
+        displayName: 'Production Without View',
+        password: 'secret',
+        roleId: noViewRole.id,
+      );
+      await security.setUserScopes(noViewUser.id, [
+        UserScope(
+          id: 'production-no-view-stage-$suffix',
+          userId: noViewUser.id,
+          type: ScopeType.productionStage,
+          scopeId: firstStageId,
+        ),
+      ]);
+      security.logout();
+      await security.login(noViewUser.username, 'secret');
+      await expectLater(dataSource.orders(), throwsException);
+      await expectLater(dataSource.getOrder(order.id), throwsException);
+      await expectLater(dataSource.activeProducts(), throwsException);
+
+      security.logout();
+      await security.login('admin', 'Furnexa-Test-Admin-2026!');
+      final viewRole = await security.createRole(
+        name: 'Production View Only $suffix',
+      );
+      await security.setRolePermissions(viewRole.id, ['PRODUCTION_VIEW']);
+      final viewUser = await security.createUser(
+        username: 'production-view-only-$suffix',
+        displayName: 'Production View Only',
+        password: 'secret',
+        roleId: viewRole.id,
+      );
+      await security.setUserScopes(viewUser.id, [
+        UserScope(
+          id: 'production-view-stage-$suffix',
+          userId: viewUser.id,
+          type: ScopeType.productionStage,
+          scopeId: firstStageId,
+        ),
+      ]);
+      security.logout();
+      await security.login(viewUser.username, 'secret');
+
+      expect(
+        (await dataSource.orders()).map((value) => value.id),
+        contains(order.id),
+      );
+      expect((await dataSource.getOrder(order.id)).stages, hasLength(1));
+      expect(await dataSource.requirements(order.id), isNotEmpty);
+      expect(await dataSource.routes(), isNotEmpty);
+      expect(await dataSource.activeStages(), hasLength(1));
+      expect(await dataSource.activeWarehouses(), isNotEmpty);
+      await expectLater(
+        dataSource.accessibleProductionWarehouses(),
+        throwsException,
+      );
+      await expectLater(dataSource.outputWarehouses(order.id), throwsException);
+      await expectLater(
+        dataSource.createOrder(productId: productId, plannedQuantity: 1),
+        throwsException,
+      );
+      await expectLater(
+        dataSource.saveRoute(productId, [firstStageId]),
+        throwsException,
+      );
+      await expectLater(dataSource.planOrder(draft.id), throwsException);
+      await expectLater(
+        dataSource.consumeMaterial(
+          orderId: inProgress.id,
+          rawMaterialId: rawMaterialId,
+          warehouseId: warehouseId,
+          quantity: 1,
+          date: now,
+          operationId: 'view-only-consumption-$suffix',
+        ),
+        throwsException,
+      );
+      await expectLater(
+        dataSource.recordOutput(
+          orderId: inProgress.id,
+          warehouseId: warehouseId,
+          quantity: 1,
+          date: now,
+          operationId: 'view-only-output-$suffix',
+        ),
+        throwsException,
+      );
+    },
+  );
+
+  test('production reads honor stage and warehouse scopes', () async {
+    final firstOrder = await inProgressOrder();
+    final db = await FurnexaDatabase.instance.database;
+    final otherWarehouseId = 'production-other-warehouse-$suffix';
+    await db.insert('warehouses', {
+      'id': otherWarehouseId,
+      'factoryId': factoryId,
+      'name': 'مخزن آخر $suffix',
+      'code': 'PWO-$suffix',
+      'state': 'active',
+      'createdAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+    await db.insert('stock_balances', {
+      'id': 'raw-other-balance-$suffix',
+      'warehouseId': otherWarehouseId,
+      'itemId': rawMaterialId,
+      'itemType': 'RAW_MATERIAL',
+      'quantity': 10,
+      'createdAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+    await db.insert('inventory_valuations', {
+      'id': 'raw-other-valuation-$suffix',
+      'warehouseId': otherWarehouseId,
+      'itemId': rawMaterialId,
+      'itemType': 'RAW_MATERIAL',
+      'quantity': 10,
+      'averageCost': 10,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+
+    await dataSource.consumeMaterial(
+      orderId: firstOrder.id,
+      rawMaterialId: rawMaterialId,
+      warehouseId: warehouseId,
+      quantity: 5,
+      date: now,
+      operationId: 'scope-first-consumption-$suffix',
+    );
+    await dataSource.consumeMaterial(
+      orderId: firstOrder.id,
+      rawMaterialId: rawMaterialId,
+      warehouseId: otherWarehouseId,
+      quantity: 5,
+      date: now,
+      operationId: 'scope-other-consumption-$suffix',
+    );
+    await dataSource.recordOutput(
+      orderId: firstOrder.id,
+      warehouseId: warehouseId,
+      quantity: 1,
+      date: now,
+      operationId: 'scope-first-output-$suffix',
+    );
+    await dataSource.recordOutput(
+      orderId: firstOrder.id,
+      warehouseId: otherWarehouseId,
+      quantity: 0.5,
+      date: now,
+      operationId: 'scope-other-output-$suffix',
+    );
+
+    await dataSource.saveRoute(productId, [secondStageId]);
+    final otherStageOrder = await dataSource.createOrder(
+      productId: productId,
+      plannedQuantity: 2,
+    );
+    await dataSource.planOrder(otherStageOrder.id);
+    await dataSource.startOrder(otherStageOrder.id);
+    await dataSource.startStage(otherStageOrder.stages.single.id);
+    await dataSource.completeStage(otherStageOrder.stages.single.id);
+    await dataSource.consumeMaterial(
+      orderId: otherStageOrder.id,
+      rawMaterialId: rawMaterialId,
+      warehouseId: otherWarehouseId,
+      quantity: 1,
+      date: now,
+      operationId: 'scope-other-stage-consumption-$suffix',
+    );
+    final warehouseScopedOrder = await dataSource.createOrder(
+      productId: productId,
+      plannedQuantity: 2,
+    );
+    await dataSource.planOrder(warehouseScopedOrder.id);
+    await dataSource.startOrder(warehouseScopedOrder.id);
+    await dataSource.startStage(warehouseScopedOrder.stages.single.id);
+    await dataSource.completeStage(warehouseScopedOrder.stages.single.id);
+    await dataSource.consumeMaterial(
+      orderId: warehouseScopedOrder.id,
+      rawMaterialId: rawMaterialId,
+      warehouseId: warehouseId,
+      quantity: 1,
+      date: now,
+      operationId: 'scope-authorized-warehouse-consumption-$suffix',
+    );
+
+    final security = SecurityLocalDataSource();
+    final role = await security.createRole(name: 'Production Scopes $suffix');
+    await security.setRolePermissions(role.id, ['PRODUCTION_VIEW']);
+    final user = await security.createUser(
+      username: 'production-scopes-$suffix',
+      displayName: 'Production Scopes',
+      password: 'secret',
+      roleId: role.id,
+    );
+    await security.setUserScopes(user.id, [
+      UserScope(
+        id: 'production-stage-scope-$suffix',
+        userId: user.id,
+        type: ScopeType.productionStage,
+        scopeId: firstStageId,
+      ),
+      UserScope(
+        id: 'production-warehouse-scope-$suffix',
+        userId: user.id,
+        type: ScopeType.warehouse,
+        scopeId: warehouseId,
+      ),
+    ]);
+    security.logout();
+    await security.login(user.username, 'secret');
+
+    expect(
+      (await dataSource.orders()).map((value) => value.id),
+      contains(firstOrder.id),
+    );
+    expect(
+      (await dataSource.orders()).map((value) => value.id),
+      contains(warehouseScopedOrder.id),
+    );
+    expect(
+      (await dataSource.orders()).map((value) => value.id),
+      isNot(contains(otherStageOrder.id)),
+    );
+    expect((await dataSource.getOrder(firstOrder.id)).stages, hasLength(1));
+    expect(
+      (await dataSource.getOrder(warehouseScopedOrder.id)).stages,
+      isEmpty,
+    );
+    expect(await dataSource.consumptions(firstOrder.id), hasLength(1));
+    expect(await dataSource.outputs(firstOrder.id), hasLength(1));
+    await expectLater(dataSource.getOrder(otherStageOrder.id), throwsException);
+    expect(await dataSource.activeWarehouses(), hasLength(1));
+    expect(await dataSource.activeStages(), hasLength(1));
+  });
+
+  testWidgets('Production navigation is gated by PRODUCTION_VIEW', (
+    tester,
+  ) async {
+    final security = SecurityLocalDataSource();
+    final role = await security.createRole(name: 'Production Nav $suffix');
+    await security.setRolePermissions(role.id, []);
+    final user = await security.createUser(
+      username: 'production-nav-$suffix',
+      displayName: 'Production Nav',
+      password: 'secret',
+      roleId: role.id,
+    );
+    await security.setUserScopes(user.id, const []);
+    security.logout();
+    await security.login(user.username, 'secret');
+
+    await tester.pumpWidget(
+      MaterialApp(home: ProductionPage(security: security)),
+    );
+    expect(find.text('ليس لديك صلاحية لعرض الإنتاج'), findsOneWidget);
+
+    await tester.pumpWidget(const app.FurnexaApp(initialLocale: Locale('en')));
+    await tester.pumpAndSettle();
+    final sidebar = find.byType(ListView).first;
+    expect(
+      find.descendant(of: sidebar, matching: find.text('Production')),
+      findsNothing,
+    );
+
+    security.logout();
+    await security.login('admin', 'Furnexa-Test-Admin-2026!');
+    final viewRole = await security.createRole(
+      name: 'Production Nav View $suffix',
+    );
+    await security.setRolePermissions(viewRole.id, ['PRODUCTION_VIEW']);
+    final viewUser = await security.createUser(
+      username: 'production-nav-view-$suffix',
+      displayName: 'Production Nav View',
+      password: 'secret',
+      roleId: viewRole.id,
+    );
+    await security.setUserScopes(viewUser.id, const []);
+    security.logout();
+    await security.login(viewUser.username, 'secret');
+
+    await tester.pumpWidget(
+      const app.FurnexaApp(
+        key: ValueKey('production-view-app'),
+        initialLocale: Locale('en'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final viewSidebar = find.byType(ListView).first;
+    expect(
+      find.descendant(of: viewSidebar, matching: find.text('Production')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.descendant(of: viewSidebar, matching: find.text('Production')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('أمر جديد'), findsNothing);
   });
 
   test('consumption and output integrate with stock atomically', () async {

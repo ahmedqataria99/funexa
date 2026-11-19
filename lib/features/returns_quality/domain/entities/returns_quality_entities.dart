@@ -143,6 +143,153 @@ class SalesReturnItem {
   );
 }
 
+class SalesReturnReceiptItem {
+  const SalesReturnReceiptItem({
+    required this.salesReturnItemId,
+    required this.quantity,
+    this.baseQuantity,
+  });
+
+  final String salesReturnItemId;
+  final double quantity;
+  final double? baseQuantity;
+}
+
+class SalesReturnSourceDelivery {
+  const SalesReturnSourceDelivery({
+    required this.id,
+    required this.deliveryNumber,
+    required this.salesOrderId,
+    required this.salesOrderNumber,
+    required this.customerId,
+    required this.customerName,
+    required this.warehouseId,
+    required this.deliveryDate,
+  });
+
+  final String id;
+  final String deliveryNumber;
+  final String salesOrderId;
+  final String salesOrderNumber;
+  final String customerId;
+  final String customerName;
+  final String warehouseId;
+  final DateTime deliveryDate;
+}
+
+class SalesReturnSourceLine {
+  const SalesReturnSourceLine({
+    required this.deliveryItemId,
+    required this.itemId,
+    required this.itemType,
+    required this.itemName,
+    required this.deliveredQuantity,
+    required this.deliveredBaseQuantity,
+    required this.previouslyReturnedBaseQuantity,
+    required this.unitId,
+    required this.unitName,
+    required this.baseUnitId,
+    required this.baseUnitName,
+    required this.unitConversionFactor,
+    required this.inventoryIdentityKind,
+    required this.identitySnapshotStatus,
+    this.variantId,
+    this.variantName,
+  });
+
+  final String deliveryItemId;
+  final String itemId;
+  final String itemType;
+  final String itemName;
+  final double deliveredQuantity;
+  final double deliveredBaseQuantity;
+  final double previouslyReturnedBaseQuantity;
+  final String unitId;
+  final String unitName;
+  final String baseUnitId;
+  final String baseUnitName;
+  final double unitConversionFactor;
+  final String inventoryIdentityKind;
+  final String identitySnapshotStatus;
+  final String? variantId;
+  final String? variantName;
+
+  double get returnableBaseQuantity =>
+      deliveredBaseQuantity - previouslyReturnedBaseQuantity;
+  double get returnableQuantity =>
+      returnableBaseQuantity / unitConversionFactor;
+}
+
+class SalesReturnWorkflowLine {
+  const SalesReturnWorkflowLine({
+    required this.item,
+    required this.itemName,
+    required this.unitName,
+    required this.deliveredQuantity,
+    required this.receivedQuantity,
+    required this.receivedBaseQuantity,
+    required this.acceptedQuantity,
+    required this.acceptedBaseQuantity,
+    required this.rejectedQuantity,
+    required this.rejectedBaseQuantity,
+  });
+
+  final SalesReturnItem item;
+  final String itemName;
+  final String unitName;
+  final double deliveredQuantity;
+  final double receivedQuantity;
+  final double receivedBaseQuantity;
+  final double acceptedQuantity;
+  final double acceptedBaseQuantity;
+  final double rejectedQuantity;
+  final double rejectedBaseQuantity;
+}
+
+class SalesReturnReceiptRecord {
+  const SalesReturnReceiptRecord({
+    required this.id,
+    required this.receiptNumber,
+    required this.warehouseId,
+    required this.warehouseName,
+    required this.receiptDate,
+    required this.items,
+  });
+
+  final String id;
+  final String receiptNumber;
+  final String warehouseId;
+  final String warehouseName;
+  final DateTime receiptDate;
+  final List<SalesReturnReceiptItem> items;
+}
+
+class SalesReturnWorkflowDetails {
+  const SalesReturnWorkflowDetails({
+    required this.salesReturn,
+    required this.customerName,
+    required this.salesOrderNumber,
+    required this.deliveryNumber,
+    required this.destinationWarehouseName,
+    required this.lines,
+    required this.receipts,
+    required this.acceptedTransferCount,
+    this.inspection,
+    this.journalNumber,
+  });
+
+  final SalesReturn salesReturn;
+  final String customerName;
+  final String salesOrderNumber;
+  final String deliveryNumber;
+  final String destinationWarehouseName;
+  final List<SalesReturnWorkflowLine> lines;
+  final List<SalesReturnReceiptRecord> receipts;
+  final QualityInspection? inspection;
+  final int acceptedTransferCount;
+  final String? journalNumber;
+}
+
 class SalesReturn {
   const SalesReturn({
     required this.id,
@@ -202,6 +349,9 @@ class SalesReturn {
     notes: row['notes'] as String?,
     createdAt: _date(row['createdAt']),
     updatedAt: _date(row['updatedAt']),
+    items: row['items'] is List<SalesReturnItem>
+        ? row['items'] as List<SalesReturnItem>
+        : const [],
   );
 }
 
@@ -308,6 +458,9 @@ class PurchaseReturn {
     this.reason,
     this.status = ReturnStatus.pending,
     this.notes,
+    this.approvedBy,
+    this.approvedAt,
+    this.approvalNotes,
     required this.createdAt,
     required this.updatedAt,
     this.items = const [],
@@ -323,6 +476,8 @@ class PurchaseReturn {
   final String? reason;
   final ReturnStatus status;
   final String? notes;
+  final String? approvedBy, approvalNotes;
+  final DateTime? approvedAt;
   final DateTime createdAt;
   final DateTime updatedAt;
   final List<PurchaseReturnItem> items;
@@ -338,6 +493,9 @@ class PurchaseReturn {
     'reason': reason,
     'status': status.value,
     'notes': notes,
+    'approvedBy': approvedBy,
+    'approvedAt': approvedAt?.millisecondsSinceEpoch,
+    'approvalNotes': approvalNotes,
     'createdAt': createdAt.millisecondsSinceEpoch,
     'updatedAt': updatedAt.millisecondsSinceEpoch,
   };
@@ -353,9 +511,201 @@ class PurchaseReturn {
     reason: row['reason'] as String?,
     status: _returnStatus(row['status'] as String?),
     notes: row['notes'] as String?,
+    approvedBy: row['approvedBy'] as String?,
+    approvedAt: row['approvedAt'] == null ? null : _date(row['approvedAt']),
+    approvalNotes: row['approvalNotes'] as String?,
     createdAt: _date(row['createdAt']),
     updatedAt: _date(row['updatedAt']),
   );
+}
+
+class PurchaseReturnSourceOrder {
+  const PurchaseReturnSourceOrder({
+    required this.id,
+    required this.orderNumber,
+    required this.supplierId,
+    required this.supplierName,
+    required this.orderDate,
+  });
+
+  final String id, orderNumber, supplierId, supplierName;
+  final DateTime orderDate;
+}
+
+class PurchaseReturnSourceLine {
+  const PurchaseReturnSourceLine({
+    required this.purchaseOrderItemId,
+    required this.receiptId,
+    required this.receiptNumber,
+    required this.sourceWarehouseId,
+    required this.itemId,
+    required this.itemType,
+    required this.itemName,
+    required this.quantity,
+    required this.receivedQuantity,
+    required this.receivedBaseQuantity,
+    required this.purchaseOrderReceivedBaseQuantity,
+    required this.returnedBaseQuantity,
+    required this.receiptReturnedBaseQuantity,
+    required this.unitPrice,
+    required this.unitId,
+    required this.unitName,
+    required this.baseUnitId,
+    required this.unitConversionFactor,
+    required this.inventoryIdentityKind,
+    required this.identitySnapshotStatus,
+    this.variantId,
+    this.variantName,
+  });
+
+  final String purchaseOrderItemId, receiptId, receiptNumber;
+  final String sourceWarehouseId;
+  final String itemId, itemType, itemName, unitId, unitName, baseUnitId;
+  final String inventoryIdentityKind, identitySnapshotStatus;
+  final String? variantId, variantName;
+  final double quantity, receivedQuantity, receivedBaseQuantity;
+  final double purchaseOrderReceivedBaseQuantity;
+  final double returnedBaseQuantity, receiptReturnedBaseQuantity, unitPrice;
+  final double unitConversionFactor;
+  double get returnableBaseQuantity =>
+      (receivedBaseQuantity - receiptReturnedBaseQuantity)
+          .clamp(0, double.infinity)
+          .clamp(
+            0,
+            (purchaseOrderReceivedBaseQuantity - returnedBaseQuantity).clamp(
+              0,
+              double.infinity,
+            ),
+          )
+          .toDouble();
+  double get returnableQuantity =>
+      returnableBaseQuantity / unitConversionFactor;
+}
+
+class PurchaseReturnReceiptItem {
+  const PurchaseReturnReceiptItem({
+    this.id,
+    required this.purchaseReturnItemId,
+    required this.quantity,
+    this.baseQuantity,
+    this.movementReference,
+    this.inspectionStatus,
+    this.inspectedQuantity = 0,
+    this.acceptedQuantity = 0,
+    this.rejectedQuantity = 0,
+    this.quarantinedQuantity = 0,
+    this.handedOverQuantity = 0,
+  });
+
+  final String? id;
+  final String purchaseReturnItemId;
+  final double quantity;
+  final double? baseQuantity;
+  final String? movementReference;
+  final String? inspectionStatus;
+  final double inspectedQuantity, acceptedQuantity, rejectedQuantity;
+  final double quarantinedQuantity, handedOverQuantity;
+}
+
+class PurchaseReturnReceiptRecord {
+  const PurchaseReturnReceiptRecord({
+    required this.id,
+    required this.receiptNumber,
+    required this.warehouseId,
+    required this.warehouseName,
+    required this.receiptDate,
+    required this.items,
+    this.receivedBy,
+    this.notes,
+  });
+
+  final String id, receiptNumber, warehouseId, warehouseName;
+  final DateTime receiptDate;
+  final String? receivedBy, notes;
+  final List<PurchaseReturnReceiptItem> items;
+}
+
+class PurchaseReturnHandoverItem {
+  const PurchaseReturnHandoverItem({
+    required this.purchaseReturnItemId,
+    required this.purchaseReturnReceiptItemId,
+    required this.quantity,
+    this.baseQuantity,
+    this.movementReference,
+  });
+
+  final String purchaseReturnItemId, purchaseReturnReceiptItemId;
+  final double quantity;
+  final double? baseQuantity;
+  final String? movementReference;
+}
+
+class PurchaseReturnHandoverRecord {
+  const PurchaseReturnHandoverRecord({
+    required this.id,
+    required this.handoverNumber,
+    required this.warehouseId,
+    required this.handoverDate,
+    required this.items,
+    this.performedBy,
+    this.notes,
+    this.journalEntryId,
+    this.journalNumber,
+  });
+
+  final String id, handoverNumber, warehouseId;
+  final DateTime handoverDate;
+  final String? performedBy, notes, journalEntryId, journalNumber;
+  final List<PurchaseReturnHandoverItem> items;
+}
+
+class PurchaseReturnWorkflowLine {
+  const PurchaseReturnWorkflowLine({
+    required this.item,
+    required this.itemName,
+    required this.unitName,
+    required this.requestedQuantity,
+    required this.receivedQuantity,
+    required this.inspectedQuantity,
+    required this.acceptedQuantity,
+    required this.rejectedQuantity,
+    required this.quarantinedQuantity,
+    required this.handedOverQuantity,
+  });
+
+  final PurchaseReturnItem item;
+  final String itemName, unitName;
+  final double requestedQuantity;
+  final double receivedQuantity, inspectedQuantity;
+  final double acceptedQuantity, rejectedQuantity, quarantinedQuantity;
+  final double handedOverQuantity;
+  double get awaitingInspectionQuantity =>
+      (receivedQuantity - inspectedQuantity).clamp(0, double.infinity);
+  double get eligibleHandoverQuantity =>
+      (acceptedQuantity - handedOverQuantity).clamp(0, double.infinity);
+}
+
+class PurchaseReturnWorkflowDetails {
+  const PurchaseReturnWorkflowDetails({
+    required this.purchaseReturn,
+    required this.supplierName,
+    required this.purchaseOrderNumber,
+    required this.warehouseName,
+    required this.lines,
+    required this.receipts,
+    required this.inspections,
+    required this.handovers,
+    required this.hasInspectionRecords,
+    required this.receiptQcComplete,
+  });
+
+  final PurchaseReturn purchaseReturn;
+  final String supplierName, purchaseOrderNumber, warehouseName;
+  final List<PurchaseReturnWorkflowLine> lines;
+  final List<PurchaseReturnReceiptRecord> receipts;
+  final List<QualityInspection> inspections;
+  final List<PurchaseReturnHandoverRecord> handovers;
+  final bool hasInspectionRecords, receiptQcComplete;
 }
 
 class QualityInspectionItem {
@@ -368,6 +718,7 @@ class QualityInspectionItem {
     required this.acceptedQuantity,
     required this.rejectedQuantity,
     this.sourceReturnItemId,
+    this.purchaseReturnReceiptItemId,
     this.productId,
     this.variantId,
     this.inventoryIdentityKind,
@@ -379,6 +730,8 @@ class QualityInspectionItem {
     this.inspectedBaseQuantity,
     this.acceptedBaseQuantity,
     this.rejectedBaseQuantity,
+    this.quarantinedQuantity = 0,
+    this.quarantinedBaseQuantity,
     this.result = QualityInspectionResult.passed,
     this.notes,
   });
@@ -391,6 +744,7 @@ class QualityInspectionItem {
   final double acceptedQuantity;
   final double rejectedQuantity;
   final String? sourceReturnItemId;
+  final String? purchaseReturnReceiptItemId;
   final String? productId, variantId;
   final String? inventoryIdentityKind, identitySnapshotStatus;
   final String? unitId, baseUnitId;
@@ -398,7 +752,9 @@ class QualityInspectionItem {
   final double? requestedBaseQuantity,
       inspectedBaseQuantity,
       acceptedBaseQuantity,
-      rejectedBaseQuantity;
+      rejectedBaseQuantity,
+      quarantinedBaseQuantity;
+  final double quarantinedQuantity;
   final QualityInspectionResult result;
   final String? notes;
 
@@ -409,6 +765,7 @@ class QualityInspectionItem {
       'inspectionId': inspectionId,
       'itemId': itemId,
       'sourceReturnItemId': sourceReturnItemId,
+      'purchaseReturnReceiptItemId': purchaseReturnReceiptItemId,
       'productId': productId ?? itemId,
       'variantId': variantId,
       'inventoryIdentityKind': inventoryIdentityKind ?? 'BASE',
@@ -427,6 +784,9 @@ class QualityInspectionItem {
           inspectedBaseQuantity ?? inspectedQuantity * factor,
       'acceptedBaseQuantity': acceptedBaseQuantity ?? acceptedQuantity * factor,
       'rejectedBaseQuantity': rejectedBaseQuantity ?? rejectedQuantity * factor,
+      'quarantinedQuantity': quarantinedQuantity,
+      'quarantinedBaseQuantity':
+          quarantinedBaseQuantity ?? quarantinedQuantity * factor,
       'result': result.value,
       'notes': notes,
       'createdAt': DateTime.now().millisecondsSinceEpoch,
@@ -440,6 +800,7 @@ class QualityInspectionItem {
     itemId: row['itemId'] as String,
     itemType: row['itemType'] as String,
     sourceReturnItemId: row['sourceReturnItemId'] as String?,
+    purchaseReturnReceiptItemId: row['purchaseReturnReceiptItemId'] as String?,
     productId: row['productId'] as String?,
     variantId: row['variantId'] as String?,
     inventoryIdentityKind: row['inventoryIdentityKind'] as String?,
@@ -455,6 +816,9 @@ class QualityInspectionItem {
     inspectedBaseQuantity: (row['inspectedBaseQuantity'] as num?)?.toDouble(),
     acceptedBaseQuantity: (row['acceptedBaseQuantity'] as num?)?.toDouble(),
     rejectedBaseQuantity: (row['rejectedBaseQuantity'] as num?)?.toDouble(),
+    quarantinedQuantity: (row['quarantinedQuantity'] as num?)?.toDouble() ?? 0,
+    quarantinedBaseQuantity: (row['quarantinedBaseQuantity'] as num?)
+        ?.toDouble(),
     result: _inspectionResult(row['result'] as String?),
     notes: row['notes'] as String?,
   );
@@ -467,6 +831,7 @@ class QualityInspection {
     required this.sourceType,
     required this.sourceId,
     this.warehouseId,
+    this.purchaseReturnReceiptId,
     required this.itemId,
     required this.itemType,
     this.inspectedBy,
@@ -484,6 +849,7 @@ class QualityInspection {
   final String sourceType;
   final String sourceId;
   final String? warehouseId;
+  final String? purchaseReturnReceiptId;
   final String itemId;
   final String itemType;
   final String? inspectedBy;
@@ -501,6 +867,7 @@ class QualityInspection {
     'sourceType': sourceType,
     'sourceId': sourceId,
     'warehouseId': warehouseId,
+    'purchaseReturnReceiptId': purchaseReturnReceiptId,
     'itemId': itemId,
     'itemType': itemType,
     'inspectedBy': inspectedBy,
@@ -521,6 +888,7 @@ class QualityInspection {
     sourceType: row['sourceType'] as String,
     sourceId: row['sourceId'] as String,
     warehouseId: row['warehouseId'] as String?,
+    purchaseReturnReceiptId: row['purchaseReturnReceiptId'] as String?,
     itemId: row['itemId'] as String,
     itemType: row['itemType'] as String,
     inspectedBy: row['inspectedBy'] as String?,

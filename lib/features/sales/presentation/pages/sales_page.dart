@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
@@ -15,7 +16,6 @@ import 'package:furnexa/features/sales/data/repositories/sales_repository_impl.d
 import 'package:furnexa/features/sales/domain/entities/sales_entities.dart';
 import 'package:furnexa/features/sales/domain/repositories/sales_repository.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
-import 'package:furnexa/features/warehouses_stock/data/repositories/warehouses_stock_repository_impl.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -26,6 +26,11 @@ int _salesDeliveryOperationSequence = 0;
 String _newSalesDeliveryOperationId() {
   _salesDeliveryOperationSequence++;
   return 'sales-delivery-${DateTime.now().microsecondsSinceEpoch}-$_salesDeliveryOperationSequence';
+}
+
+String _newSalesInvoiceOperationId() {
+  _salesDeliveryOperationSequence++;
+  return 'sales-invoice-${DateTime.now().microsecondsSinceEpoch}-$_salesDeliveryOperationSequence';
 }
 
 class SalesPage extends StatefulWidget {
@@ -40,8 +45,6 @@ class SalesPage extends StatefulWidget {
 class _SalesPageState extends State<SalesPage>
     with SingleTickerProviderStateMixin {
   final SalesRepository repository = SalesRepositoryImpl();
-  final WarehousesStockRepositoryImpl stockRepository =
-      WarehousesStockRepositoryImpl();
   late final TabController tabs;
   List<Customer> customers = [];
   List<Quotation> quotations = [];
@@ -87,16 +90,17 @@ class _SalesPageState extends State<SalesPage>
           (item) => item.remainingQuantity > 0,
         )) {
           for (final warehouse in warehouses) {
-            if (await stockRepository.balance(
-                  warehouse.id,
-                  item.itemId,
-                  StockItemType.product,
-                  variantId: item.variantId,
-                  identityKind: InventoryIdentityKindValue.parse(
-                    item.inventoryIdentityKind,
-                  ),
-                ) >
-                0) {
+            final stock = await repository.deliveryAvailability(
+              warehouseId: warehouse.id,
+              orderItem: item,
+            );
+            final remainingOrderBase = math.max(
+              0,
+              item.normalizedBaseQuantity -
+                  item.deliveredBaseQuantity -
+                  stock.orderReservedBaseQuantity,
+            );
+            if (stock.availableBaseQuantity > 0 && remainingOrderBase > 0) {
               available = true;
               break;
             }
@@ -328,6 +332,26 @@ class _SalesPageState extends State<SalesPage>
                         ? () => deliveryForm(order)
                         : null,
                   ),
+                if (order.status != SalesOrderStatus.draft &&
+                    order.status != SalesOrderStatus.cancelled &&
+                    order.items.any(
+                      (item) => item.remainingInvoiceQuantity > 0,
+                    ))
+                  IconButton(
+                    tooltip: AppLocalizations.of(context).issueSalesInvoice,
+                    icon: const Icon(Icons.request_quote_outlined),
+                    onPressed: () => invoiceForm(order),
+                  ),
+                IconButton(
+                  tooltip: AppLocalizations.of(context).salesOrderDetails,
+                  icon: const Icon(Icons.info_outline),
+                  onPressed: () => openSalesOrderDetails(order),
+                ),
+                IconButton(
+                  tooltip: AppLocalizations.of(context).salesDeliveries,
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  onPressed: () => openDeliveryHistory(order),
+                ),
                 if (order.status == SalesOrderStatus.draft ||
                     order.status == SalesOrderStatus.confirmed)
                   IconButton(
@@ -520,10 +544,11 @@ class _SalesPageState extends State<SalesPage>
   }
 
   Future<void> deliveryForm(SalesOrder order) async {
+    final localizations = AppLocalizations.of(context);
     final warehouses = await repository.activeWarehouses();
     if (!mounted) return;
     if (warehouses.isEmpty) {
-      message('أضف مخزناً نشطاً أولاً');
+      message(localizations.deliveryWarehouseUnavailable);
       return;
     }
     final items = order.items
@@ -540,6 +565,11 @@ class _SalesPageState extends State<SalesPage>
         catalog: catalog,
         unitNames: unitNames,
         operationId: _newSalesDeliveryOperationId(),
+        loadAvailability: (warehouseId, orderItem) =>
+            repository.deliveryAvailability(
+              warehouseId: warehouseId,
+              orderItem: orderItem,
+            ),
       ),
     );
     if (value == null) return;
@@ -565,10 +595,360 @@ class _SalesPageState extends State<SalesPage>
         operationId: value.operationId,
       );
       await load();
+      message(AppLocalizations.of(context).deliveryReservedNotice);
     } catch (e) {
-      message(e.toString());
+      message(_deliveryErrorMessage(e));
     }
   }
+
+  Future<void> invoiceForm(SalesOrder order) async {
+    final localizations = AppLocalizations.of(context);
+    final invoiceableItems = order.items
+        .where((item) => item.remainingInvoiceQuantity > 0)
+        .toList();
+    if (invoiceableItems.isEmpty) return;
+    final draft = await showDialog<_SalesInvoiceDraft>(
+      context: context,
+      builder: (_) => SalesInvoiceForm(
+        order: order,
+        items: invoiceableItems,
+        unitNames: unitNames,
+      ),
+    );
+    if (draft == null) return;
+    try {
+      final invoice = await repository.issueInvoice(
+        salesOrderId: order.id,
+        invoiceDate: DateTime.now(),
+        items: [
+          for (final entry in draft.quantities.entries)
+            if (entry.value > 0)
+              SalesInvoiceLineRequest(
+                salesOrderItemId: entry.key,
+                quantity: entry.value,
+              ),
+        ],
+        operationId: _newSalesInvoiceOperationId(),
+        invoiceDiscount: draft.discount,
+      );
+      await load();
+      message(
+        '${localizations.invoiceIssued} ${invoice.invoiceNumber} • ${invoice.grandTotal.toStringAsFixed(2)}',
+      );
+    } catch (_) {
+      message(localizations.invoiceIssueFailed);
+    }
+  }
+
+  Future<void> openSalesOrderDetails(SalesOrder order) async {
+    final localizations = AppLocalizations.of(context);
+    var currentOrder = order;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Text(localizations.salesOrderDetails),
+          content: SizedBox(
+            width: 560,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final item in currentOrder.items)
+                  ListTile(
+                    title: Text(
+                      '${item.itemId}${item.variantId == null ? '' : ' • ${item.variantId}'}',
+                    ),
+                    subtitle: Text(
+                      '${localizations.savedUnitSellingPrice}: ${item.unitPrice.toStringAsFixed(2)} ${unitNames[item.unitId] ?? ''}',
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '${item.quantity} ${unitNames[item.unitId] ?? ''}',
+                        ),
+                        if ((currentOrder.status == SalesOrderStatus.draft ||
+                                currentOrder.status ==
+                                    SalesOrderStatus.confirmed) &&
+                            item.deliveredQuantity == 0 &&
+                            item.invoicedQuantity == 0)
+                          IconButton(
+                            tooltip: localizations.editSalesPrice,
+                            icon: const Icon(Icons.edit_outlined),
+                            onPressed: () async {
+                              final controller = TextEditingController(
+                                text: item.unitPrice.toString(),
+                              );
+                              final value = await showDialog<double>(
+                                context: dialogContext,
+                                builder: (priceContext) => AlertDialog(
+                                  title: Text(localizations.editSalesPrice),
+                                  content: TextField(
+                                    controller: controller,
+                                    autofocus: true,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                    decoration: InputDecoration(
+                                      labelText:
+                                          localizations.newSalesUnitPrice,
+                                    ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(priceContext),
+                                      child: Text(localizations.cancel),
+                                    ),
+                                    FilledButton(
+                                      onPressed: () {
+                                        final price = double.tryParse(
+                                          controller.text.trim(),
+                                        );
+                                        if (price == null ||
+                                            !price.isFinite ||
+                                            price < 0) {
+                                          return;
+                                        }
+                                        Navigator.pop(priceContext, price);
+                                      },
+                                      child: Text(localizations.save),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              controller.dispose();
+                              if (value == null) return;
+                              try {
+                                final updated = await repository
+                                    .updateSalesOrderItemPrice(
+                                      salesOrderId: currentOrder.id,
+                                      salesOrderItemId: item.id,
+                                      unitPrice: value,
+                                    );
+                                if (!mounted) return;
+                                setDialogState(() => currentOrder = updated);
+                                await load();
+                                message(localizations.salesPriceChanged);
+                              } catch (_) {
+                                message(localizations.salesPriceChangeFailed);
+                              }
+                            },
+                          ),
+                      ],
+                    ),
+                  ),
+                const Divider(),
+                _TotalLine(
+                  label: localizations.salesSubtotalLabel,
+                  value: currentOrder.subtotal,
+                ),
+                _TotalLine(
+                  label: localizations.salesDiscountLabel,
+                  value: currentOrder.discount,
+                ),
+                _TotalLine(
+                  label: localizations.salesTaxLabel,
+                  value: currentOrder.tax,
+                ),
+                _TotalLine(
+                  label: localizations.invoiceTotal,
+                  value: currentOrder.grandTotal,
+                  prominent: true,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: Text(localizations.back),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _deliveryErrorMessage(Object error) {
+    final localizations = AppLocalizations.of(context);
+    if (error is! SalesDeliveryException) {
+      return localizations.deliveryActionFailed;
+    }
+    return switch (error.failure) {
+      SalesDeliveryFailure.warehouseUnavailable =>
+        localizations.deliveryWarehouseUnavailable,
+      SalesDeliveryFailure.insufficientAvailableStock =>
+        localizations.deliveryInsufficientAvailableStock,
+      SalesDeliveryFailure.stockUnitMismatch =>
+        localizations.deliveryActionFailed,
+      SalesDeliveryFailure.reservationMissing =>
+        localizations.deliveryReservationMissing,
+      SalesDeliveryFailure.physicalStockInsufficient =>
+        localizations.deliveryPhysicalStockInsufficient,
+      SalesDeliveryFailure.cancellationAfterDispatch =>
+        localizations.deliveryCancellationAfterDispatch,
+      SalesDeliveryFailure.invalidTransition =>
+        localizations.deliveryInvalidTransition,
+    };
+  }
+
+  Future<void> openDeliveryHistory(SalesOrder order) async {
+    final localizations = AppLocalizations.of(context);
+    var deliveries = await repository.deliveries(order.id);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Text(localizations.salesDeliveries),
+          content: SizedBox(
+            width: 540,
+            child: deliveries.isEmpty
+                ? Text(localizations.noSalesDeliveries)
+                : ListView(
+                    shrinkWrap: true,
+                    children: deliveries.map((delivery) {
+                      final actions = switch (delivery.status) {
+                        DeliveryDispatchStatus.pending => [
+                          DeliveryDispatchStatus.dispatched,
+                          DeliveryDispatchStatus.cancelled,
+                        ],
+                        DeliveryDispatchStatus.dispatched => [
+                          DeliveryDispatchStatus.inTransit,
+                        ],
+                        DeliveryDispatchStatus.inTransit => [
+                          DeliveryDispatchStatus.delivered,
+                        ],
+                        DeliveryDispatchStatus.delivered ||
+                        DeliveryDispatchStatus.cancelled =>
+                          <DeliveryDispatchStatus>[],
+                      };
+                      return ListTile(
+                        title: Text(delivery.deliveryNumber),
+                        subtitle: Text(
+                          '${delivery.warehouseId} • '
+                          '${_deliveryStatusLabel(localizations, delivery.status)}',
+                        ),
+                        trailing: actions.isEmpty
+                            ? null
+                            : PopupMenuButton<DeliveryDispatchStatus>(
+                                tooltip:
+                                    localizations.deliveryInvalidTransition,
+                                onSelected: (nextStatus) async {
+                                  if (nextStatus ==
+                                      DeliveryDispatchStatus.delivered) {
+                                    final confirmed = await showDialog<bool>(
+                                      context: dialogContext,
+                                      builder: (confirmationContext) =>
+                                          AlertDialog(
+                                            title: Text(
+                                              localizations
+                                                  .confirmDeliveryCompletion,
+                                            ),
+                                            content: Text(
+                                              localizations
+                                                  .confirmDeliveryQuestion,
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.pop(
+                                                  confirmationContext,
+                                                  false,
+                                                ),
+                                                child: Text(
+                                                  localizations.cancel,
+                                                ),
+                                              ),
+                                              FilledButton(
+                                                onPressed: () => Navigator.pop(
+                                                  confirmationContext,
+                                                  true,
+                                                ),
+                                                child: Text(
+                                                  localizations
+                                                      .confirmDeliveryCompletion,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                    );
+                                    if (confirmed != true) return;
+                                  }
+                                  try {
+                                    await repository.updateDeliveryDispatch(
+                                      deliveryId: delivery.id,
+                                      status: nextStatus,
+                                      dispatchDate:
+                                          nextStatus ==
+                                              DeliveryDispatchStatus.dispatched
+                                          ? DateTime.now()
+                                          : null,
+                                    );
+                                    final refreshed = await repository
+                                        .deliveries(order.id);
+                                    if (!mounted) return;
+                                    setDialogState(
+                                      () => deliveries = refreshed,
+                                    );
+                                    await load();
+                                  } catch (error) {
+                                    if (mounted) {
+                                      message(_deliveryErrorMessage(error));
+                                    }
+                                  }
+                                },
+                                itemBuilder: (_) => actions
+                                    .map(
+                                      (status) => PopupMenuItem(
+                                        value: status,
+                                        child: Text(
+                                          _deliveryActionLabel(
+                                            localizations,
+                                            status,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                      );
+                    }).toList(),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: Text(localizations.back),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _deliveryStatusLabel(
+    AppLocalizations localizations,
+    DeliveryDispatchStatus status,
+  ) => switch (status) {
+    DeliveryDispatchStatus.pending => localizations.deliveryPending,
+    DeliveryDispatchStatus.dispatched => localizations.deliveryDispatched,
+    DeliveryDispatchStatus.inTransit => localizations.deliveryInTransit,
+    DeliveryDispatchStatus.delivered => localizations.deliveryDelivered,
+    DeliveryDispatchStatus.cancelled => localizations.deliveryCancelled,
+  };
+
+  String _deliveryActionLabel(
+    AppLocalizations localizations,
+    DeliveryDispatchStatus status,
+  ) => switch (status) {
+    DeliveryDispatchStatus.pending => localizations.deliveryPending,
+    DeliveryDispatchStatus.dispatched => localizations.dispatchDelivery,
+    DeliveryDispatchStatus.inTransit => localizations.markDeliveryInTransit,
+    DeliveryDispatchStatus.delivered => localizations.confirmDeliveryCompletion,
+    DeliveryDispatchStatus.cancelled => localizations.cancelPendingDelivery,
+  };
 
   Future<void> openCustomerProfile(Customer customer) async {
     await Navigator.of(context).push(
@@ -1726,6 +2106,182 @@ class _SalesLineDraft {
   }
 }
 
+class _SalesInvoiceDraft {
+  const _SalesInvoiceDraft({required this.quantities, required this.discount});
+
+  final Map<String, double> quantities;
+  final double discount;
+}
+
+class SalesInvoiceForm extends StatefulWidget {
+  const SalesInvoiceForm({
+    required this.order,
+    required this.items,
+    required this.unitNames,
+    super.key,
+  });
+
+  final SalesOrder order;
+  final List<SalesItem> items;
+  final Map<String, String> unitNames;
+
+  @override
+  State<SalesInvoiceForm> createState() => _SalesInvoiceFormState();
+}
+
+class _SalesInvoiceFormState extends State<SalesInvoiceForm> {
+  final formKey = GlobalKey<FormState>();
+  final discountController = TextEditingController(text: '0');
+  late final Map<String, TextEditingController> quantityControllers = {
+    for (final item in widget.items)
+      item.id: TextEditingController(
+        text: item.remainingInvoiceQuantity.toString(),
+      ),
+  };
+  String? validationError;
+
+  double get invoiceDiscount =>
+      double.tryParse(discountController.text.trim()) ?? double.nan;
+
+  double get estimatedTotal {
+    var total = 0.0;
+    for (final item in widget.items) {
+      final quantity =
+          double.tryParse(quantityControllers[item.id]!.text.trim()) ?? 0;
+      final factor = quantity / item.quantity;
+      total +=
+          item.unitPrice * quantity -
+          item.discount * factor +
+          item.tax * factor;
+    }
+    return total - (invoiceDiscount.isFinite ? invoiceDiscount : 0);
+  }
+
+  @override
+  void dispose() {
+    discountController.dispose();
+    for (final controller in quantityControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  void submit() {
+    final localizations = AppLocalizations.of(context);
+    if (!formKey.currentState!.validate()) return;
+    final quantities = {
+      for (final entry in quantityControllers.entries)
+        entry.key: double.parse(entry.value.text.trim()),
+    };
+    if (!quantities.values.any((value) => value > 0)) {
+      setState(() => validationError = localizations.invoiceQuantityInvalid);
+      return;
+    }
+    Navigator.pop(
+      context,
+      _SalesInvoiceDraft(quantities: quantities, discount: invoiceDiscount),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final localizations = AppLocalizations.of(context);
+    return AlertDialog(
+      title: Text(localizations.issueSalesInvoice),
+      content: SizedBox(
+        width: 620,
+        height: 480,
+        child: Form(
+          key: formKey,
+          child: Column(
+            children: [
+              Expanded(
+                child: ListView(
+                  children: [
+                    for (final item in widget.items)
+                      ListTile(
+                        title: Text(
+                          '${item.itemId}${item.variantId == null ? '' : ' • ${item.variantId}'}',
+                        ),
+                        subtitle: Text(
+                          '${localizations.savedUnitSellingPrice}: ${item.unitPrice.toStringAsFixed(2)} ${widget.unitNames[item.unitId] ?? ''} • ${localizations.remainingQuantity}: ${item.remainingInvoiceQuantity}',
+                        ),
+                        trailing: SizedBox(
+                          width: 115,
+                          child: TextFormField(
+                            controller: quantityControllers[item.id],
+                            decoration: InputDecoration(
+                              labelText: localizations.invoiceQuantity,
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            onChanged: (_) => setState(() {}),
+                            validator: (text) {
+                              final value = double.tryParse(text ?? '');
+                              return value == null ||
+                                      !value.isFinite ||
+                                      value < 0 ||
+                                      value >
+                                          item.remainingInvoiceQuantity +
+                                              0.000001
+                                  ? localizations.invoiceQuantityInvalid
+                                  : null;
+                            },
+                          ),
+                        ),
+                      ),
+                    TextFormField(
+                      controller: discountController,
+                      decoration: InputDecoration(
+                        labelText: localizations.invoiceDiscount,
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      onChanged: (_) => setState(() {}),
+                      validator: (text) {
+                        final value = double.tryParse(text ?? '');
+                        return value == null || !value.isFinite || value < 0
+                            ? localizations.invoiceDiscount
+                            : null;
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    _TotalLine(
+                      label: localizations.invoiceTotal,
+                      value: estimatedTotal,
+                      prominent: true,
+                    ),
+                    if (validationError != null)
+                      Text(
+                        validationError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(localizations.cancel),
+        ),
+        FilledButton.icon(
+          onPressed: submit,
+          icon: const Icon(Icons.receipt_long_outlined),
+          label: Text(localizations.issueSalesInvoice),
+        ),
+      ],
+    );
+  }
+}
+
 class _DeliveryDraft {
   const _DeliveryDraft({
     required this.warehouse,
@@ -1746,6 +2302,7 @@ class DeliveryForm extends StatefulWidget {
     required this.catalog,
     required this.unitNames,
     required this.operationId,
+    required this.loadAvailability,
     super.key,
   });
   final List<Warehouse> warehouses;
@@ -1753,6 +2310,11 @@ class DeliveryForm extends StatefulWidget {
   final List<StockItemOption> catalog;
   final Map<String, String> unitNames;
   final String operationId;
+  final Future<DeliveryStockAvailability> Function(
+    String warehouseId,
+    SalesItem orderItem,
+  )
+  loadAvailability;
 
   @override
   State<DeliveryForm> createState() => _DeliveryFormState();
@@ -1761,13 +2323,60 @@ class DeliveryForm extends StatefulWidget {
 class _DeliveryFormState extends State<DeliveryForm> {
   late Warehouse warehouse = widget.warehouses.first;
   late SalesItem item = widget.items.first;
+  DeliveryStockAvailability? availability;
+  bool loadingAvailability = true;
+  bool availabilityFailed = false;
   final quantity = TextEditingController();
   final formKey = GlobalKey<FormState>();
+
+  double get maxDeliverableQuantity {
+    final stock = availability;
+    if (stock == null || item.unitConversionFactor <= 0) return 0;
+    final remainingBase = math.max(
+      0,
+      item.normalizedBaseQuantity -
+          item.deliveredBaseQuantity -
+          stock.orderReservedBaseQuantity,
+    );
+    return math.min(
+      stock.availableBaseQuantity / item.unitConversionFactor,
+      remainingBase / item.unitConversionFactor,
+    );
+  }
 
   @override
   void initState() {
     super.initState();
-    quantity.text = item.remainingQuantity.toString();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshAvailability(resetQuantity: true);
+    });
+  }
+
+  Future<void> _refreshAvailability({bool resetQuantity = false}) async {
+    setState(() {
+      loadingAvailability = true;
+      availability = null;
+      availabilityFailed = false;
+    });
+    try {
+      final result = await widget.loadAvailability(warehouse.id, item);
+      if (!mounted) return;
+      setState(() {
+        availability = result;
+        loadingAvailability = false;
+        if (resetQuantity) quantity.text = maxDeliverableQuantity.toString();
+        final current = double.tryParse(quantity.text) ?? 0;
+        if (current > maxDeliverableQuantity) {
+          quantity.text = maxDeliverableQuantity.toString();
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        loadingAvailability = false;
+        availabilityFailed = true;
+      });
+    }
   }
 
   @override
@@ -1793,7 +2402,11 @@ class _DeliveryFormState extends State<DeliveryForm> {
                       DropdownMenuItem(value: value, child: Text(value.name)),
                 )
                 .toList(),
-            onChanged: (value) => setState(() => warehouse = value!),
+            onChanged: (value) {
+              if (value == null) return;
+              setState(() => warehouse = value);
+              _refreshAvailability(resetQuantity: true);
+            },
           ),
           DropdownButtonFormField<SalesItem>(
             initialValue: item,
@@ -1809,12 +2422,41 @@ class _DeliveryFormState extends State<DeliveryForm> {
                 )
                 .toList(),
             onChanged: (value) {
+              if (value == null) return;
               setState(() {
-                item = value!;
-                quantity.text = item.remainingQuantity.toString();
+                item = value;
               });
+              _refreshAvailability(resetQuantity: true);
             },
           ),
+          const SizedBox(height: 12),
+          if (loadingAvailability)
+            Text(AppLocalizations.of(context).deliveryStockLoading)
+          else if (availabilityFailed)
+            Text(AppLocalizations.of(context).deliveryAvailabilityFailed)
+          else if (availability case final stock?) ...[
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Text(
+                '${AppLocalizations.of(context).physicalStockQuantity}: '
+                '${_quantityText(stock.physicalBaseQuantity)}  •  '
+                '${AppLocalizations.of(context).reservedStockQuantity}: '
+                '${_quantityText(stock.reservedBaseQuantity)}  •  '
+                '${AppLocalizations.of(context).availableStockQuantity}: '
+                '${_quantityText(stock.availableBaseQuantity)} '
+                '${widget.unitNames[item.baseUnitId ?? item.unitId] ?? ''}',
+              ),
+            ),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Text(
+                '${AppLocalizations.of(context).remainingQuantity}: '
+                '${_quantityText(maxDeliverableQuantity)} '
+                '${widget.unitNames[item.unitId] ?? ''}',
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
           TextFormField(
             controller: quantity,
             decoration: const InputDecoration(labelText: 'الكمية المسلمة'),
@@ -1823,8 +2465,10 @@ class _DeliveryFormState extends State<DeliveryForm> {
               final parsed = double.tryParse(value ?? '');
               return parsed == null ||
                       parsed <= 0 ||
-                      parsed > item.remainingQuantity
-                  ? 'تجاوز الكمية المتبقية'
+                      parsed > maxDeliverableQuantity + 0.000001
+                  ? AppLocalizations.of(
+                      context,
+                    ).deliveryQuantityExceedsAvailable
                   : null;
             },
           ),
@@ -1837,19 +2481,24 @@ class _DeliveryFormState extends State<DeliveryForm> {
         child: const Text('إلغاء'),
       ),
       FilledButton(
-        onPressed: () {
-          if (!formKey.currentState!.validate()) return;
-          Navigator.pop(
-            context,
-            _DeliveryDraft(
-              warehouse: warehouse,
-              item: item,
-              quantity: double.parse(quantity.text),
-              operationId: widget.operationId,
-            ),
-          );
-        },
-        child: const Text('ترحيل التسليم'),
+        onPressed:
+            loadingAvailability ||
+                availabilityFailed ||
+                maxDeliverableQuantity <= 0
+            ? null
+            : () {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(
+                  context,
+                  _DeliveryDraft(
+                    warehouse: warehouse,
+                    item: item,
+                    quantity: double.parse(quantity.text),
+                    operationId: widget.operationId,
+                  ),
+                );
+              },
+        child: Text(AppLocalizations.of(context).reserveDelivery),
       ),
     ],
   );

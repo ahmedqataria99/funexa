@@ -5,6 +5,8 @@ import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities
 import 'package:furnexa/features/raw_materials_products/domain/entities/item_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 
+class RawMaterialUnitChangeBlockedException implements Exception {}
+
 class RawMaterialsProductsLocalDataSource {
   RawMaterialsProductsLocalDataSource([SecurityLocalDataSource? security])
     : _security = security ?? SecurityLocalDataSource();
@@ -499,7 +501,48 @@ class RawMaterialsProductsLocalDataSource {
   Future<void> saveRawMaterial(RawMaterial value) async {
     await _requireActive('categories', value.categoryId, 'التصنيف');
     await _requireActive('units', value.unitId, 'الوحدة');
-    await _save('raw_materials', value.id, value.toMap());
+    final db = await _db;
+    _security.require('PRODUCTS_EDIT');
+    final updated = await db.transaction((txn) async {
+      final existing = await txn.query(
+        'raw_materials',
+        columns: ['unitId'],
+        where: 'id = ?',
+        whereArgs: [value.id],
+        limit: 1,
+      );
+      if (existing.isNotEmpty && existing.single['unitId'] != value.unitId) {
+        final dependentOrders = await txn.rawQuery(
+          '''
+          SELECT 1
+          FROM production_order_bom_items bom
+          JOIN production_orders po ON po.id = bom.productionOrderId
+          WHERE bom.rawMaterialId = ?
+            AND po.status NOT IN ('COMPLETED', 'CANCELLED')
+          LIMIT 1
+          ''',
+          [value.id],
+        );
+        if (dependentOrders.isNotEmpty) {
+          throw RawMaterialUnitChangeBlockedException();
+        }
+      }
+      final count = await txn.update(
+        'raw_materials',
+        value.toMap(),
+        where: 'id = ?',
+        whereArgs: [value.id],
+      );
+      if (count == 0) await txn.insert('raw_materials', value.toMap());
+      return count;
+    });
+    await _security.audit(
+      action: updated == 0 ? 'CREATE' : 'UPDATE',
+      module: 'Products',
+      entityType: 'raw_materials',
+      entityId: value.id,
+      description: 'Master data changed',
+    );
   }
 
   Future<void> saveProduct(Product value) async {

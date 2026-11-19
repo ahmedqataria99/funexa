@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/features/factory_structure/data/datasources/factory_structure_local_data_source.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/factory_profile.dart';
@@ -29,6 +30,120 @@ void main() {
     tearDown(() async {
       await DatabaseTestHelper.reset();
     });
+
+    Future<Warehouse> createPurposeWarehouse(
+      String id,
+      WarehousePurpose purpose,
+    ) async {
+      final now = DateTime.now();
+      final factory = FactoryProfile(
+        id: 'purpose-factory-$id',
+        name: 'Purpose Factory $id',
+        code: 'PF-$id',
+        createdAt: now,
+        updatedAt: now,
+      );
+      await dataSource.upsertFactory(factory);
+      final warehouse = Warehouse(
+        id: id,
+        factoryId: factory.id,
+        name: 'Purpose Warehouse $id',
+        code: 'PW-$id',
+        purpose: purpose,
+        createdAt: now,
+        updatedAt: now,
+      );
+      await dataSource.upsertWarehouse(warehouse);
+      return warehouse;
+    }
+
+    Future<void> seedPurposeBalance(
+      String warehouseId, {
+      required double quantity,
+    }) async {
+      final db = await FurnexaDatabase.instance.database;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await db.insert('stock_balances', {
+        'id': 'purpose-balance-$warehouseId',
+        'warehouseId': warehouseId,
+        'itemId': 'purpose-item-$warehouseId',
+        'itemType': 'RAW_MATERIAL',
+        'quantity': quantity,
+        'inventoryIdentityKind': 'BASE',
+        'createdAt': now,
+        'updatedAt': now,
+      });
+    }
+
+    Future<void> seedPurposeValuation(
+      String warehouseId, {
+      required double quantity,
+      required double averageCost,
+    }) async {
+      final db = await FurnexaDatabase.instance.database;
+      await db.insert('inventory_valuations', {
+        'id': 'purpose-valuation-$warehouseId',
+        'warehouseId': warehouseId,
+        'itemId': 'purpose-item-$warehouseId',
+        'itemType': 'RAW_MATERIAL',
+        'quantity': quantity,
+        'averageCost': averageCost,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      });
+    }
+
+    Future<Map<String, Object?>> purposeState(String warehouseId) async {
+      final db = await FurnexaDatabase.instance.database;
+      return {
+        'warehouse': await db.query(
+          'warehouses',
+          where: 'id = ?',
+          whereArgs: [warehouseId],
+        ),
+        'balances': await db.query(
+          'stock_balances',
+          where: 'warehouseId = ?',
+          whereArgs: [warehouseId],
+          orderBy: 'id ASC',
+        ),
+        'valuations': await db.query(
+          'inventory_valuations',
+          where: 'warehouseId = ?',
+          whereArgs: [warehouseId],
+          orderBy: 'id ASC',
+        ),
+        'transactions': await db.query(
+          'stock_transactions',
+          where: 'warehouseId = ?',
+          whereArgs: [warehouseId],
+          orderBy: 'id ASC',
+        ),
+        'journalEntries': await db.query('journal_entries', orderBy: 'id ASC'),
+        'journalLines': await db.query('journal_lines', orderBy: 'id ASC'),
+        'journalParties': await db.query(
+          'journal_parties',
+          orderBy: 'journalEntryId ASC',
+        ),
+      };
+    }
+
+    Future<void> expectPurposeChangeRejected(
+      Warehouse warehouse,
+      WarehousePurpose purpose,
+    ) async {
+      final before = await purposeState(warehouse.id);
+      await expectLater(
+        dataSource.upsertWarehouse(warehouse.copyWith(purpose: purpose)),
+        throwsA(
+          predicate(
+            (error) => error.toString().contains(
+              'Cannot change warehouse purpose while it contains stock or inventory value',
+            ),
+          ),
+        ),
+      );
+      expect(await purposeState(warehouse.id), before);
+    }
 
     test('database migration creates all required tables', () async {
       final db = await dataSource.database;
@@ -491,6 +606,118 @@ void main() {
       expect((await persisted).single['type'], 'مواد خام');
       expect((await persisted).single['purpose'], 'SELLABLE');
     });
+
+    test(
+      'blocks QUARANTINE to SELLABLE while stock quantity is non-zero',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-stock-quarantine',
+          WarehousePurpose.quarantine,
+        );
+        await seedPurposeBalance(warehouse.id, quantity: 5);
+        await seedPurposeValuation(warehouse.id, quantity: 5, averageCost: 2);
+
+        await expectPurposeChangeRejected(warehouse, WarehousePurpose.sellable);
+      },
+    );
+
+    test(
+      'blocks purpose change for an exact small non-zero valuation',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-value-rework',
+          WarehousePurpose.rework,
+        );
+        await seedPurposeBalance(warehouse.id, quantity: 0);
+        await seedPurposeValuation(
+          warehouse.id,
+          quantity: 0.0000001,
+          averageCost: 0.0000001,
+        );
+
+        await expectPurposeChangeRejected(warehouse, WarehousePurpose.sellable);
+      },
+    );
+
+    test(
+      'blocks DAMAGED to SELLABLE with stock and zero valuation value',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-stock-damaged',
+          WarehousePurpose.damaged,
+        );
+        await seedPurposeBalance(warehouse.id, quantity: 3);
+        await seedPurposeValuation(warehouse.id, quantity: 0, averageCost: 0);
+
+        await expectPurposeChangeRejected(warehouse, WarehousePurpose.sellable);
+      },
+    );
+
+    test(
+      'allows purpose change when balance and valuation values are zero',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-zero-rows',
+          WarehousePurpose.quarantine,
+        );
+        await seedPurposeBalance(warehouse.id, quantity: 0);
+        await seedPurposeValuation(warehouse.id, quantity: 0, averageCost: 8);
+
+        await dataSource.upsertWarehouse(
+          warehouse.copyWith(purpose: WarehousePurpose.sellable),
+        );
+
+        final state = await purposeState(warehouse.id);
+        expect((state['warehouse'] as List).single['purpose'], 'SELLABLE');
+        expect((state['balances'] as List).single['quantity'], 0);
+        expect((state['valuations'] as List).single['quantity'], 0);
+        expect(
+          (state['valuations'] as List).single['quantity'] *
+              (state['valuations'] as List).single['averageCost'],
+          0,
+        );
+      },
+    );
+
+    test(
+      'allows purpose change when no balance or valuation rows exist',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-no-rows',
+          WarehousePurpose.rework,
+        );
+
+        await dataSource.upsertWarehouse(
+          warehouse.copyWith(purpose: WarehousePurpose.damaged),
+        );
+
+        final state = await purposeState(warehouse.id);
+        expect((state['warehouse'] as List).single['purpose'], 'DAMAGED');
+      },
+    );
+
+    test(
+      'allows unrelated warehouse edits while purpose is unchanged',
+      () async {
+        final warehouse = await createPurposeWarehouse(
+          'purpose-name-edit',
+          WarehousePurpose.quarantine,
+        );
+        await seedPurposeBalance(warehouse.id, quantity: 2);
+        await seedPurposeValuation(warehouse.id, quantity: 2, averageCost: 5);
+
+        await dataSource.upsertWarehouse(
+          warehouse.copyWith(name: 'Updated quarantined warehouse'),
+        );
+
+        final state = await purposeState(warehouse.id);
+        final persisted = (state['warehouse'] as List).single;
+        expect(persisted['name'], 'Updated quarantined warehouse');
+        expect(persisted['purpose'], 'QUARANTINE');
+        expect((state['balances'] as List).single['quantity'], 2);
+        expect((state['valuations'] as List).single['quantity'], 2);
+      },
+    );
 
     test('persists an explicit controlled warehouse purpose', () async {
       final factory = FactoryProfile(

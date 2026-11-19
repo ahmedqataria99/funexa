@@ -11,12 +11,28 @@ abstract class SalesRepository {
   Future<void> changeQuotationStatus(String id, QuotationStatus status);
   Future<List<SalesOrder>> orders([String query = '']);
   Future<SalesOrder> saveOrder(SalesOrder order);
+  Future<SalesInvoice> issueInvoice({
+    required String salesOrderId,
+    required DateTime invoiceDate,
+    required List<SalesInvoiceLineRequest> items,
+    required String operationId,
+    double invoiceDiscount = 0,
+  });
+  Future<SalesOrder> updateSalesOrderItemPrice({
+    required String salesOrderId,
+    required String salesOrderItemId,
+    required double unitPrice,
+  });
   Future<SalesOrder> convertQuotationToOrder(
     Quotation quotation,
     SalesOrder order,
   );
   Future<void> changeOrderStatus(String id, SalesOrderStatus status);
   Future<List<SalesDelivery>> deliveries(String orderId);
+  Future<DeliveryStockAvailability> deliveryAvailability({
+    required String warehouseId,
+    required SalesItem orderItem,
+  });
   Future<SalesDelivery> updateDeliveryDispatch({
     required String deliveryId,
     required DeliveryDispatchStatus status,

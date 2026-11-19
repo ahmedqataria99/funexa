@@ -51,7 +51,10 @@ void main() {
       )
     ''');
     await db.execute('''
-      CREATE TABLE units (id TEXT PRIMARY KEY)
+      CREATE TABLE units (
+        id TEXT PRIMARY KEY,
+        active INTEGER NOT NULL
+      )
     ''');
     await db.execute('''
       CREATE TABLE raw_materials (
@@ -77,9 +80,16 @@ void main() {
         id TEXT PRIMARY KEY,
         purchaseRequestId TEXT NOT NULL,
         itemId TEXT NOT NULL,
+        productId TEXT,
         itemType TEXT NOT NULL,
         quantity REAL NOT NULL,
         unitId TEXT NOT NULL,
+        variantId TEXT,
+        baseUnitId TEXT,
+        unitConversionFactor REAL NOT NULL DEFAULT 1,
+        baseQuantity REAL,
+        inventoryIdentityKind TEXT NOT NULL DEFAULT 'BASE',
+        identitySnapshotStatus TEXT NOT NULL DEFAULT 'UNVERIFIED',
         notes TEXT
       )
     ''');
@@ -89,7 +99,7 @@ void main() {
       'code': 'MIG-SUP',
       'active': 1,
     });
-    await db.insert('units', {'id': 'migration-unit'});
+    await db.insert('units', {'id': 'migration-unit', 'active': 1});
     await db.insert('raw_materials', {
       'id': 'migration-material',
       'unitId': 'migration-unit',

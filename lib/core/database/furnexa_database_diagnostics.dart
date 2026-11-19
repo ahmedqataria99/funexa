@@ -1,7 +1,7 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
@@ -158,7 +158,7 @@ class FurnexaDatabaseDiagnostics {
     final logPath = await logFilePath;
 
     await _appendLine(line, logPath);
-    debugPrint('FURNEXA_DB_DIAGNOSTICS $line');
+    developer.log('FURNEXA_DB_DIAGNOSTICS $line', name: 'Furnexa');
   }
 
   static Future<void> reportFailure({
@@ -176,7 +176,7 @@ class FurnexaDatabaseDiagnostics {
     });
     final logPath = await logFilePath;
     await _appendLine(record, logPath);
-    debugPrint('FURNEXA_DB_DIAGNOSTICS $record');
+    developer.log('FURNEXA_DB_DIAGNOSTICS $record', name: 'Furnexa');
   }
 
   static Future<void> recordUiPipeline({
@@ -213,7 +213,7 @@ class FurnexaDatabaseDiagnostics {
     });
     final logPath = await logFilePath;
     await _appendLine(record, logPath);
-    debugPrint('FURNEXA_DB_DIAGNOSTICS $record');
+    developer.log('FURNEXA_DB_DIAGNOSTICS $record', name: 'Furnexa');
   }
 
   static Future<void> _appendLine(String line, String logPath) async {
@@ -222,7 +222,10 @@ class FurnexaDatabaseDiagnostics {
         logPath,
       ).writeAsString('$line\n', mode: FileMode.append, flush: true);
     } on FileSystemException catch (error) {
-      debugPrint('Furnexa diagnostics could not write $logPath: $error');
+      developer.log(
+        'Furnexa diagnostics could not write $logPath: $error',
+        name: 'Furnexa',
+      );
     }
   }
 

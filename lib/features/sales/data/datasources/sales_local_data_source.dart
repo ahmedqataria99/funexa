@@ -189,6 +189,9 @@ class SalesLocalDataSource {
       if (value.items.any((item) => item.deliveredQuantity != 0)) {
         throw Exception('لا يمكن تحديد كميات التسليم عند حفظ أمر البيع');
       }
+      if (value.items.any((item) => item.invoicedQuantity != 0)) {
+        throw Exception('لا يمكن تحديد كميات الفوترة عند حفظ أمر البيع');
+      }
       final existing = await txn.query(
         'sales_orders',
         columns: ['status'],
@@ -215,7 +218,7 @@ class SalesLocalDataSource {
         }
         final existingItems = await txn.query(
           'sales_order_items',
-          columns: ['deliveredQuantity'],
+          columns: ['deliveredQuantity', 'invoicedQuantity'],
           where: 'salesOrderId = ?',
           whereArgs: [value.id],
         );
@@ -229,8 +232,21 @@ class SalesLocalDataSource {
         if (existingItems.any(
               (row) => (row['deliveredQuantity'] as num).toDouble() > 0,
             ) ||
+            existingItems.any(
+              (row) => (row['invoicedQuantity'] as num? ?? 0).toDouble() > 0,
+            ) ||
             existingDeliveries.isNotEmpty) {
           throw Exception('لا يمكن تعديل أمر بيع تم تسليمه');
+        }
+        final existingInvoices = await txn.query(
+          'sales_invoices',
+          columns: ['id'],
+          where: 'salesOrderId = ?',
+          whereArgs: [value.id],
+          limit: 1,
+        );
+        if (existingInvoices.isNotEmpty) {
+          throw Exception('لا يمكن تعديل أمر بيع تمت فوترته');
         }
       }
       await _saveExecutor(txn, 'sales_orders', value.id, _orderMap(value));
@@ -247,6 +263,392 @@ class SalesLocalDataSource {
       }
     });
     return value;
+  }
+
+  Future<SalesInvoice> issueInvoice({
+    required String salesOrderId,
+    required DateTime invoiceDate,
+    required List<SalesInvoiceLineRequest> items,
+    required String operationId,
+    double invoiceDiscount = 0,
+  }) async {
+    _security.require('SALES_EDIT');
+    _security.require('ACCOUNTING_POST');
+    if (items.isEmpty) throw Exception('أضف صنفاً واحداً على الأقل للفاتورة');
+    final normalizedOperationId = operationId.trim();
+    if (normalizedOperationId.isEmpty) {
+      throw Exception('معرف عملية الفاتورة غير صالح');
+    }
+    if (!invoiceDiscount.isFinite || invoiceDiscount < 0) {
+      throw Exception('خصم الفاتورة غير صالح');
+    }
+    final requests = [...items]
+      ..sort(
+        (first, second) =>
+            first.salesOrderItemId.compareTo(second.salesOrderItemId),
+      );
+    final seenItemIds = <String>{};
+    for (final item in requests) {
+      if (!seenItemIds.add(item.salesOrderItemId) ||
+          !item.quantity.isFinite ||
+          item.quantity <= 0) {
+        throw Exception('كمية بند الفاتورة غير صالحة');
+      }
+    }
+    final payloadHash = sha256
+        .convert(
+          utf8.encode(
+            jsonEncode([
+              salesOrderId,
+              invoiceDate.millisecondsSinceEpoch,
+              invoiceDiscount,
+              [
+                for (final item in requests)
+                  [item.salesOrderItemId, item.quantity],
+              ],
+            ]),
+          ),
+        )
+        .toString();
+    final db = await _db;
+    return db.transaction((txn) async {
+      final existingInvoices = await txn.query(
+        'sales_invoices',
+        where: 'operationId = ?',
+        whereArgs: [normalizedOperationId],
+        limit: 1,
+      );
+      if (existingInvoices.isNotEmpty) {
+        final existing = existingInvoices.single;
+        if (existing['operationPayloadHash'] != payloadHash) {
+          throw Exception('معرف عملية الفاتورة مستخدم لبيانات مختلفة');
+        }
+        return SalesInvoice.fromMap(existing);
+      }
+
+      final orderRows = await txn.query(
+        'sales_orders',
+        columns: ['customerId', 'status'],
+        where: 'id = ?',
+        whereArgs: [salesOrderId],
+        limit: 1,
+      );
+      if (orderRows.isEmpty) throw Exception('أمر البيع غير موجود');
+      final orderStatus = _orderStatus(orderRows.single['status'] as String);
+      if (orderStatus == SalesOrderStatus.draft ||
+          orderStatus == SalesOrderStatus.cancelled) {
+        throw Exception('يجب تأكيد أمر البيع قبل إصدار الفاتورة');
+      }
+      final customerId = orderRows.single['customerId'] as String;
+      await _validateCustomer(txn, customerId);
+      final orderRowsItems = await txn.query(
+        'sales_order_items',
+        where: 'salesOrderId = ?',
+        whereArgs: [salesOrderId],
+      );
+      final orderItems = {
+        for (final row in orderRowsItems) row['id'] as String: row,
+      };
+      final calculations = <Map<String, Object?>>[];
+      var subtotal = 0.0;
+      var orderDiscountTotal = 0.0;
+      var taxTotal = 0.0;
+      var invoiceDiscountBasis = 0.0;
+      for (final request in requests) {
+        final row = orderItems[request.salesOrderItemId];
+        if (row == null) throw Exception('بند الفاتورة غير موجود في أمر البيع');
+        _validatePersistedOrderLine(row);
+        final orderedQuantity = (row['quantity'] as num).toDouble();
+        final alreadyInvoiced =
+            (row['invoicedQuantity'] as num?)?.toDouble() ?? 0;
+        if (request.quantity > orderedQuantity - alreadyInvoiced + 0.000001) {
+          throw Exception('كمية الفاتورة تتجاوز الكمية غير المفوترة');
+        }
+        final factor = request.quantity / orderedQuantity;
+        final unitPrice = (row['unitPrice'] as num).toDouble();
+        final gross = unitPrice * request.quantity;
+        final orderDiscount = (row['discount'] as num).toDouble() * factor;
+        final tax = (row['tax'] as num).toDouble() * factor;
+        final discountBasis = gross - orderDiscount;
+        if (![
+          gross,
+          orderDiscount,
+          tax,
+          discountBasis,
+        ].every((value) => value.isFinite && value >= 0)) {
+          throw Exception('إجمالي بند الفاتورة غير صالح');
+        }
+        calculations.add({
+          'request': request,
+          'row': row,
+          'gross': gross,
+          'orderDiscount': orderDiscount,
+          'invoiceDiscount': 0.0,
+          'tax': tax,
+        });
+        subtotal += gross;
+        orderDiscountTotal += orderDiscount;
+        taxTotal += tax;
+        invoiceDiscountBasis += discountBasis;
+      }
+      if (invoiceDiscount > invoiceDiscountBasis + 0.000001) {
+        throw Exception('خصم الفاتورة يتجاوز قيمة البنود');
+      }
+      var remainingInvoiceDiscount = invoiceDiscount;
+      for (var index = 0; index < calculations.length; index++) {
+        final line = calculations[index];
+        final basis =
+            (line['gross'] as double) - (line['orderDiscount'] as double);
+        final allocation = index == calculations.length - 1
+            ? remainingInvoiceDiscount
+            : invoiceDiscountBasis == 0
+            ? 0.0
+            : invoiceDiscount * basis / invoiceDiscountBasis;
+        line['invoiceDiscount'] = allocation;
+        remainingInvoiceDiscount -= allocation;
+      }
+      final totalDiscount = orderDiscountTotal + invoiceDiscount;
+      final grandTotal = subtotal - totalDiscount + taxTotal;
+      if (!grandTotal.isFinite || grandTotal < -0.000001) {
+        throw Exception('إجمالي الفاتورة غير صالح');
+      }
+
+      final invoiceId = _id('sales-invoice');
+      final invoiceNumber = _id('INV');
+      final createdAt = DateTime.now().millisecondsSinceEpoch;
+      await txn.insert('sales_invoices', {
+        'id': invoiceId,
+        'invoiceNumber': invoiceNumber,
+        'salesOrderId': salesOrderId,
+        'customerId': customerId,
+        'invoiceDate': invoiceDate.millisecondsSinceEpoch,
+        'subtotal': subtotal,
+        'discount': totalDiscount,
+        'tax': taxTotal,
+        'grandTotal': grandTotal < 0 ? 0 : grandTotal,
+        'status': 'POSTED',
+        'operationId': normalizedOperationId,
+        'operationPayloadHash': payloadHash,
+        'createdAt': createdAt,
+        'updatedAt': createdAt,
+      });
+      for (final line in calculations) {
+        final request = line['request'] as SalesInvoiceLineRequest;
+        final row = line['row'] as Map<String, Object?>;
+        final lineGross = line['gross'] as double;
+        final orderDiscount = line['orderDiscount'] as double;
+        final lineInvoiceDiscount = line['invoiceDiscount'] as double;
+        final tax = line['tax'] as double;
+        await txn.insert('sales_invoice_items', {
+          'id': _id('sales-invoice-item'),
+          'salesInvoiceId': invoiceId,
+          'salesOrderItemId': request.salesOrderItemId,
+          'quantity': request.quantity,
+          'unitId': row['unitId'],
+          'unitPrice': row['unitPrice'],
+          'orderDiscount': orderDiscount,
+          'invoiceDiscount': lineInvoiceDiscount,
+          'tax': tax,
+          'lineTotal': lineGross - orderDiscount - lineInvoiceDiscount + tax,
+        });
+        final priorQuantity =
+            (row['invoicedQuantity'] as num?)?.toDouble() ?? 0;
+        final changed = await txn.update(
+          'sales_order_items',
+          {'invoicedQuantity': priorQuantity + request.quantity},
+          where: 'id = ? AND invoicedQuantity = ?',
+          whereArgs: [request.salesOrderItemId, priorQuantity],
+        );
+        if (changed != 1) {
+          throw Exception('تغيرت كمية الفوترة؛ حدّث القائمة ثم أعد المحاولة');
+        }
+      }
+      if (grandTotal > 0) {
+        Future<String> accountId(String code) async {
+          final rows = await txn.query(
+            'accounts',
+            columns: ['id'],
+            where: 'code = ? AND active = 1',
+            whereArgs: [code],
+            limit: 1,
+          );
+          if (rows.isEmpty) throw Exception('حساب الفاتورة غير متاح');
+          return rows.single['id'] as String;
+        }
+
+        await _accounting.postJournalWithinTransaction(
+          executor: txn,
+          date: invoiceDate,
+          description: 'فاتورة مبيعات $invoiceNumber',
+          referenceType: 'SALES_INVOICE',
+          referenceId: invoiceId,
+          partyType: 'CUSTOMER',
+          partyId: customerId,
+          lines: [
+            JournalLineInput(
+              accountId: await accountId('1200'),
+              debit: grandTotal,
+            ),
+            JournalLineInput(
+              accountId: await accountId('4000'),
+              credit: grandTotal,
+            ),
+          ],
+        );
+      }
+      await _recordSalesInvoiceAudit(txn, invoiceId, invoiceNumber);
+      final invoiceRows = await txn.query(
+        'sales_invoices',
+        where: 'id = ?',
+        whereArgs: [invoiceId],
+        limit: 1,
+      );
+      return SalesInvoice.fromMap(invoiceRows.single);
+    });
+  }
+
+  Future<SalesOrder> updateSalesOrderItemPrice({
+    required String salesOrderId,
+    required String salesOrderItemId,
+    required double unitPrice,
+  }) async {
+    _security.require('SALES_EDIT');
+    if (!unitPrice.isFinite || unitPrice < 0) {
+      throw Exception('سعر البيع غير صالح');
+    }
+    final db = await _db;
+    return db.transaction((txn) async {
+      final orderRows = await txn.query(
+        'sales_orders',
+        columns: ['status'],
+        where: 'id = ?',
+        whereArgs: [salesOrderId],
+        limit: 1,
+      );
+      if (orderRows.isEmpty) throw Exception('أمر البيع غير موجود');
+      final status = _orderStatus(orderRows.single['status'] as String);
+      if (status != SalesOrderStatus.draft &&
+          status != SalesOrderStatus.confirmed) {
+        throw Exception('لا يمكن تعديل سعر أمر بيع نهائي');
+      }
+      final deliveryRows = await txn.query(
+        'sales_deliveries',
+        columns: ['id'],
+        where: 'salesOrderId = ?',
+        whereArgs: [salesOrderId],
+        limit: 1,
+      );
+      final invoiceRows = await txn.query(
+        'sales_invoices',
+        columns: ['id'],
+        where: 'salesOrderId = ?',
+        whereArgs: [salesOrderId],
+        limit: 1,
+      );
+      if (deliveryRows.isNotEmpty || invoiceRows.isNotEmpty) {
+        throw Exception('لا يمكن تعديل سعر أمر بيع له تسليم أو فاتورة');
+      }
+      final itemRows = await txn.query(
+        'sales_order_items',
+        where: 'id = ? AND salesOrderId = ?',
+        whereArgs: [salesOrderItemId, salesOrderId],
+        limit: 1,
+      );
+      if (itemRows.isEmpty) throw Exception('بند أمر البيع غير موجود');
+      final item = itemRows.single;
+      _validatePersistedOrderLine(item);
+      final quantity = (item['quantity'] as num).toDouble();
+      final discount = (item['discount'] as num).toDouble();
+      final tax = (item['tax'] as num).toDouble();
+      final lineTotal = quantity * unitPrice - discount + tax;
+      if (!lineTotal.isFinite || lineTotal < 0) {
+        throw Exception('السعر الجديد لا يغطي خصم البند');
+      }
+      final oldPrice = (item['unitPrice'] as num).toDouble();
+      final changed = await txn.update(
+        'sales_order_items',
+        {'unitPrice': unitPrice, 'lineTotal': lineTotal},
+        where: 'id = ? AND salesOrderId = ? AND unitPrice = ?',
+        whereArgs: [salesOrderItemId, salesOrderId, oldPrice],
+      );
+      if (changed != 1) throw Exception('تغير سعر البند؛ حدّث القائمة');
+
+      final orderItems = await txn.query(
+        'sales_order_items',
+        where: 'salesOrderId = ?',
+        whereArgs: [salesOrderId],
+      );
+      final subtotal = orderItems.fold<double>(
+        0,
+        (sum, row) =>
+            sum +
+            (row['quantity'] as num).toDouble() *
+                (row['unitPrice'] as num).toDouble(),
+      );
+      final totalDiscount = orderItems.fold<double>(
+        0,
+        (sum, row) => sum + (row['discount'] as num).toDouble(),
+      );
+      final totalTax = orderItems.fold<double>(
+        0,
+        (sum, row) => sum + (row['tax'] as num).toDouble(),
+      );
+      final updatedAt = DateTime.now().millisecondsSinceEpoch;
+      await txn.update(
+        'sales_orders',
+        {
+          'subtotal': subtotal,
+          'discount': totalDiscount,
+          'tax': totalTax,
+          'grandTotal': subtotal - totalDiscount + totalTax,
+          'updatedAt': updatedAt,
+        },
+        where: 'id = ?',
+        whereArgs: [salesOrderId],
+      );
+      final session = _security.session;
+      await txn.insert('audit_logs', {
+        'id': _id('audit'),
+        'userId': session?.user.id,
+        'usernameSnapshot': session?.user.username ?? 'SYSTEM',
+        'action': 'SALES_ORDER_PRICE_CHANGED',
+        'module': 'SALES',
+        'entityType': 'SALES_ORDER_ITEM',
+        'entityId': salesOrderItemId,
+        'timestamp': updatedAt,
+        'oldValue': oldPrice.toStringAsFixed(2),
+        'newValue': unitPrice.toStringAsFixed(2),
+        'description': 'Sales order item selling price changed',
+      });
+      final refreshed = await txn.query(
+        'sales_orders',
+        where: 'id = ?',
+        whereArgs: [salesOrderId],
+        limit: 1,
+      );
+      return _order(refreshed.single);
+    });
+  }
+
+  Future<void> _recordSalesInvoiceAudit(
+    DatabaseExecutor txn,
+    String invoiceId,
+    String invoiceNumber,
+  ) async {
+    final session = _security.session;
+    await txn.insert('audit_logs', {
+      'id': _id('audit'),
+      'userId': session?.user.id,
+      'usernameSnapshot': session?.user.username ?? 'SYSTEM',
+      'action': 'SALES_INVOICE_POSTED',
+      'module': 'SALES',
+      'entityType': 'SALES_INVOICE',
+      'entityId': invoiceId,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'oldValue': null,
+      'newValue': 'POSTED',
+      'description': 'Sales invoice $invoiceNumber posted',
+    });
   }
 
   Future<SalesOrder> convertQuotationToOrder(
@@ -436,6 +838,44 @@ class SalesLocalDataSource {
       if (!_validOrderStatusTransition(current, status)) {
         throw Exception('انتقال حالة أمر البيع غير مسموح');
       }
+      if (status == SalesOrderStatus.cancelled) {
+        final activeDeliveries = await txn.query(
+          'sales_deliveries',
+          where:
+              'salesOrderId = ? AND inventoryPosted = 0 AND status IN (?, ?, ?)',
+          whereArgs: [
+            id,
+            DeliveryDispatchStatus.pending.value,
+            DeliveryDispatchStatus.dispatched.value,
+            DeliveryDispatchStatus.inTransit.value,
+          ],
+        );
+        if (activeDeliveries.any(
+          (delivery) =>
+              delivery['status'] != DeliveryDispatchStatus.pending.value,
+        )) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.cancellationAfterDispatch,
+          );
+        }
+        for (final delivery in activeDeliveries) {
+          await txn.update(
+            'sales_deliveries',
+            {
+              'status': DeliveryDispatchStatus.cancelled.value,
+              'updatedAt': DateTime.now().millisecondsSinceEpoch,
+            },
+            where: 'id = ? AND status = ? AND inventoryPosted = 0',
+            whereArgs: [delivery['id'], DeliveryDispatchStatus.pending.value],
+          );
+          await _recordDeliveryAudit(
+            txn,
+            deliveryId: delivery['id'] as String,
+            oldStatus: DeliveryDispatchStatus.pending,
+            newStatus: DeliveryDispatchStatus.cancelled,
+          );
+        }
+      }
       final changed = await txn.update(
         'sales_orders',
         {
@@ -460,6 +900,49 @@ class SalesLocalDataSource {
     return rows.map(SalesDelivery.fromMap).toList();
   }
 
+  Future<DeliveryStockAvailability> deliveryAvailability({
+    required String warehouseId,
+    required SalesItem orderItem,
+  }) async {
+    _security.require('SALES_VIEW');
+    final db = await _db;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'sales_order_items',
+        where: 'id = ?',
+        whereArgs: [orderItem.id],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw Exception('صنف أمر البيع غير موجود');
+      final row = rows.single;
+      if ((row['productId'] as String? ?? row['itemId']) != orderItem.itemId ||
+          row['itemType'] != orderItem.itemType.value ||
+          row['variantId'] != orderItem.variantId) {
+        throw Exception('هوية صنف أمر البيع تغيرت؛ حدّث القائمة');
+      }
+      final type = row['itemType'] == 'PRODUCT'
+          ? StockItemType.product
+          : StockItemType.rawMaterial;
+      final item = await _resolveItem(
+        txn,
+        row['productId'] as String? ?? row['itemId'] as String,
+        type,
+        variantId: row['variantId'] as String?,
+        identityKind: InventoryIdentityKindValue.parse(
+          row['inventoryIdentityKind'],
+        ),
+        unitId: row['baseUnitId'] as String? ?? row['unitId'] as String,
+      );
+      final stock = await _deliveryStockAvailability(
+        txn,
+        warehouseId: warehouseId,
+        item: item,
+        salesOrderItemId: orderItem.id,
+      );
+      return stock;
+    });
+  }
+
   Future<SalesDelivery> updateDeliveryDispatch({
     required String deliveryId,
     required DeliveryDispatchStatus status,
@@ -480,12 +963,49 @@ class SalesLocalDataSource {
       );
       if (rows.isEmpty) throw Exception('التسليم غير موجود');
       final current = SalesDelivery.fromMap(rows.single);
+      final inventoryPosted = (rows.single['inventoryPosted'] as int?) ?? 1;
       await _security.requireResourceScope(
         ScopeType.warehouse,
         current.warehouseId,
       );
 
       if (current.status == status) return current;
+
+      if (status == DeliveryDispatchStatus.cancelled) {
+        if (current.status != DeliveryDispatchStatus.pending ||
+            inventoryPosted != 0) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.cancellationAfterDispatch,
+          );
+        }
+        final changed = await txn.update(
+          'sales_deliveries',
+          {
+            'status': DeliveryDispatchStatus.cancelled.value,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+          where: 'id = ? AND status = ? AND inventoryPosted = 0',
+          whereArgs: [deliveryId, current.status.value],
+        );
+        if (changed != 1) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.invalidTransition,
+          );
+        }
+        await _recordDeliveryAudit(
+          txn,
+          deliveryId: deliveryId,
+          oldStatus: current.status,
+          newStatus: status,
+        );
+        final refreshed = await txn.query(
+          'sales_deliveries',
+          where: 'id = ?',
+          whereArgs: [deliveryId],
+          limit: 1,
+        );
+        return SalesDelivery.fromMap(refreshed.single);
+      }
 
       final orderRows = await txn.query(
         'sales_orders',
@@ -498,30 +1018,43 @@ class SalesLocalDataSource {
       if (orderRows.single['status'] == 'CANCELLED') {
         throw Exception('لا يمكن تحديث حالة تسليم لأمر بيع ملغى');
       }
-      if (status == DeliveryDispatchStatus.cancelled) {
-        throw Exception('لا يمكن إلغاء تسليم تم ترحيله للمخزون والمحاسبة');
-      }
       if (!_validDeliveryDispatchTransition(current.status, status)) {
-        throw Exception('انتقال حالة التسليم غير مسموح');
+        throw const SalesDeliveryException(
+          SalesDeliveryFailure.invalidTransition,
+        );
       }
-      final changed = await txn.update(
-        'sales_deliveries',
-        {
-          'status': status.value,
-          'dispatchDate':
-              dispatchDate?.millisecondsSinceEpoch ??
-              current.dispatchDate?.millisecondsSinceEpoch,
-          'driverName': driverName ?? current.driverName,
-          'vehicleNumber': vehicleNumber ?? current.vehicleNumber,
-          'destination': destination ?? current.destination,
-          'notes': notes ?? current.notes,
-          'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        },
-        where: 'id = ? AND status = ?',
-        whereArgs: [deliveryId, current.status.value],
-      );
-      if (changed != 1) {
-        throw Exception('تغيرت حالة التسليم؛ حدّث القائمة ثم أعد المحاولة');
+      if (status == DeliveryDispatchStatus.delivered) {
+        await _completeDeliveryWithinTransaction(
+          txn,
+          delivery: current,
+          currentInventoryPosted: inventoryPosted,
+        );
+      } else {
+        final changed = await txn.update(
+          'sales_deliveries',
+          {
+            'status': status.value,
+            'dispatchDate':
+                dispatchDate?.millisecondsSinceEpoch ??
+                current.dispatchDate?.millisecondsSinceEpoch,
+            'driverName': driverName ?? current.driverName,
+            'vehicleNumber': vehicleNumber ?? current.vehicleNumber,
+            'destination': destination ?? current.destination,
+            'notes': notes ?? current.notes,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+          where: 'id = ? AND status = ? AND inventoryPosted = ?',
+          whereArgs: [deliveryId, current.status.value, inventoryPosted],
+        );
+        if (changed != 1) {
+          throw Exception('تغيرت حالة التسليم؛ حدّث القائمة ثم أعد المحاولة');
+        }
+        await _recordDeliveryAudit(
+          txn,
+          deliveryId: deliveryId,
+          oldStatus: current.status,
+          newStatus: status,
+        );
       }
       final refreshed = await txn.query(
         'sales_deliveries',
@@ -530,6 +1063,209 @@ class SalesLocalDataSource {
         limit: 1,
       );
       return SalesDelivery.fromMap(refreshed.single);
+    });
+  }
+
+  Future<void> _completeDeliveryWithinTransaction(
+    DatabaseExecutor txn, {
+    required SalesDelivery delivery,
+    required int currentInventoryPosted,
+  }) async {
+    if (currentInventoryPosted == 0) {
+      final lines = await txn.query(
+        'sales_delivery_items',
+        where: 'salesDeliveryId = ?',
+        whereArgs: [delivery.id],
+        orderBy: 'id ASC',
+      );
+      if (lines.isEmpty) {
+        throw const SalesDeliveryException(
+          SalesDeliveryFailure.reservationMissing,
+        );
+      }
+      for (final line in lines) {
+        final orderRows = await txn.query(
+          'sales_order_items',
+          where: 'id = ? AND salesOrderId = ?',
+          whereArgs: [line['salesOrderItemId'], delivery.salesOrderId],
+          limit: 1,
+        );
+        if (orderRows.isEmpty) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.reservationMissing,
+          );
+        }
+        final orderLine = orderRows.single;
+        final itemType = orderLine['itemType'] == 'PRODUCT'
+            ? StockItemType.product
+            : StockItemType.rawMaterial;
+        final inventoryItem = await _resolveItem(
+          txn,
+          orderLine['productId'] as String? ?? orderLine['itemId'] as String,
+          itemType,
+          variantId: orderLine['variantId'] as String?,
+          identityKind: InventoryIdentityKindValue.parse(
+            orderLine['inventoryIdentityKind'],
+          ),
+          unitId:
+              orderLine['baseUnitId'] as String? ??
+              orderLine['unitId'] as String,
+        );
+        if (line['productId'] != inventoryItem.baseProductId ||
+            line['variantId'] != inventoryItem.variantId ||
+            line['baseUnitId'] != inventoryItem.unitId ||
+            InventoryIdentityKindValue.parse(line['inventoryIdentityKind']) !=
+                inventoryItem.identityKind) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.reservationMissing,
+          );
+        }
+        final quantity = (line['baseQuantity'] as num).toDouble();
+        final deliveredQuantity = (line['deliveredQuantity'] as num).toDouble();
+        final conversionFactor = (line['unitConversionFactor'] as num)
+            .toDouble();
+        if (!quantity.isFinite ||
+            quantity <= 0 ||
+            !deliveredQuantity.isFinite ||
+            deliveredQuantity <= 0 ||
+            !conversionFactor.isFinite ||
+            conversionFactor <= 0 ||
+            (quantity - deliveredQuantity * conversionFactor).abs() >
+                0.000001) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.reservationMissing,
+          );
+        }
+        final availability = await _deliveryStockAvailability(
+          txn,
+          warehouseId: delivery.warehouseId,
+          item: inventoryItem,
+          salesOrderItemId: line['salesOrderItemId'] as String,
+        );
+        if (availability.orderReservedBaseQuantity + 0.000001 < quantity) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.reservationMissing,
+          );
+        }
+        if (availability.physicalBaseQuantity + 0.000001 < quantity) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.physicalStockInsufficient,
+          );
+        }
+
+        await _stock.applyStockOutWithinTransaction(
+          executor: txn,
+          warehouseId: delivery.warehouseId,
+          item: inventoryItem,
+          quantity: quantity,
+          date: delivery.deliveryDate,
+          reference: delivery.deliveryNumber,
+          notes: delivery.notes,
+        );
+        final deliveredBaseBefore = (orderLine['deliveredBaseQuantity'] as num)
+            .toDouble();
+        final deliveredBefore = (orderLine['deliveredQuantity'] as num)
+            .toDouble();
+        final changedLine = await txn.update(
+          'sales_order_items',
+          {
+            'deliveredBaseQuantity': deliveredBaseBefore + quantity,
+            'deliveredQuantity': deliveredBefore + deliveredQuantity,
+          },
+          where: 'id = ? AND salesOrderId = ?',
+          whereArgs: [line['salesOrderItemId'], delivery.salesOrderId],
+        );
+        if (changedLine != 1) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.reservationMissing,
+          );
+        }
+      }
+    }
+
+    final changedDelivery = await txn.update(
+      'sales_deliveries',
+      {
+        'status': DeliveryDispatchStatus.delivered.value,
+        'inventoryPosted': 1,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ? AND status = ? AND inventoryPosted = ?',
+      whereArgs: [delivery.id, delivery.status.value, currentInventoryPosted],
+    );
+    if (changedDelivery != 1) {
+      throw const SalesDeliveryException(
+        SalesDeliveryFailure.invalidTransition,
+      );
+    }
+    if (currentInventoryPosted == 0) {
+      final totals = await txn.query(
+        'sales_order_items',
+        where: 'salesOrderId = ?',
+        whereArgs: [delivery.salesOrderId],
+      );
+      final complete = totals.every(
+        (row) =>
+            (row['deliveredBaseQuantity'] as num).toDouble() + 0.000001 >=
+            (row['baseQuantity'] as num).toDouble(),
+      );
+      await txn.update(
+        'sales_orders',
+        {
+          'status': complete ? 'FULLY_DELIVERED' : 'PARTIALLY_DELIVERED',
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'id = ?',
+        whereArgs: [delivery.salesOrderId],
+      );
+    }
+    await _recordDeliveryAudit(
+      txn,
+      deliveryId: delivery.id,
+      oldStatus: delivery.status,
+      newStatus: DeliveryDispatchStatus.delivered,
+    );
+  }
+
+  Future<void> _recordDeliveryAudit(
+    DatabaseExecutor txn, {
+    required String deliveryId,
+    required DeliveryDispatchStatus oldStatus,
+    required DeliveryDispatchStatus newStatus,
+  }) async {
+    final session = _security.session;
+    await txn.insert('audit_logs', {
+      'id': _id('audit'),
+      'userId': session?.user.id,
+      'usernameSnapshot': session?.user.username ?? 'SYSTEM',
+      'action': 'DELIVERY_STATUS_CHANGED',
+      'module': 'SALES',
+      'entityType': 'SALES_DELIVERY',
+      'entityId': deliveryId,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'oldValue': oldStatus.value,
+      'newValue': newStatus.value,
+      'description': 'Sales delivery status changed',
+    });
+  }
+
+  Future<void> _recordDeliveryReservationAudit(
+    DatabaseExecutor txn,
+    String deliveryId,
+  ) async {
+    final session = _security.session;
+    await txn.insert('audit_logs', {
+      'id': _id('audit'),
+      'userId': session?.user.id,
+      'usernameSnapshot': session?.user.username ?? 'SYSTEM',
+      'action': 'DELIVERY_RESERVED',
+      'module': 'SALES',
+      'entityType': 'SALES_DELIVERY',
+      'entityId': deliveryId,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'oldValue': null,
+      'newValue': DeliveryDispatchStatus.pending.value,
+      'description': 'Sales delivery stock reserved',
     });
   }
 
@@ -550,7 +1286,6 @@ class SalesLocalDataSource {
     final requestKey = 'CALLER:$normalizedOperationId';
     final db = await _db;
     final persistedDelivery = await db.transaction((txn) async {
-      await _validateWarehouse(txn, warehouseId);
       await _security.requireResourceScope(ScopeType.warehouse, warehouseId);
       final orderRows = await txn.query(
         'sales_orders',
@@ -636,6 +1371,7 @@ class SalesLocalDataSource {
         }
         return SalesDelivery.fromMap(existing);
       }
+      await _validateWarehouse(txn, warehouseId);
       final currentStatus = _orderStatus(orderRows.first['status'] as String);
       if (currentStatus == SalesOrderStatus.cancelled ||
           currentStatus == SalesOrderStatus.fullyDelivered) {
@@ -647,6 +1383,11 @@ class SalesLocalDataSource {
       final requested = <String, double>{};
       final deliveredById = <String, double>{};
       final deliveredUnitsById = <String, double>{};
+      final resolvedItemsById = <String, StockItemOption>{};
+      final requestedByStockIdentity =
+          <(String, String, String, String), double>{};
+      final availableByStockIdentity =
+          <(String, String, String, String), double>{};
       for (final row in itemRows) {
         _validatePersistedOrderLine(row);
       }
@@ -664,19 +1405,68 @@ class SalesLocalDataSource {
         final orderedBase = (row['baseQuantity'] as num).toDouble();
         final deliveredBase = (row['deliveredBaseQuantity'] as num).toDouble();
         final requestedBase = entry.value * factor;
-        if (!requestedBase.isFinite ||
-            entry.value <= 0 ||
-            requestedBase > orderedBase - deliveredBase + 0.000001) {
+        if (!requestedBase.isFinite || entry.value <= 0) {
+          throw Exception('الكمية الأساسية للتسليم غير صالحة');
+        }
+        final itemType = row['itemType'] == 'PRODUCT'
+            ? StockItemType.product
+            : StockItemType.rawMaterial;
+        final stockItem = await _resolveItem(
+          txn,
+          row['productId'] as String? ?? row['itemId'] as String,
+          itemType,
+          variantId: row['variantId'] as String?,
+          identityKind: InventoryIdentityKindValue.parse(
+            row['inventoryIdentityKind'],
+          ),
+          unitId: row['baseUnitId'] as String? ?? row['unitId'] as String,
+        );
+        final availability = await _deliveryStockAvailability(
+          txn,
+          warehouseId: warehouseId,
+          item: stockItem,
+          salesOrderItemId: entry.key,
+        );
+        if (requestedBase >
+                orderedBase -
+                    deliveredBase -
+                    availability.orderReservedBaseQuantity +
+                    0.000001 ||
+            requestedBase > availability.availableBaseQuantity + 0.000001) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.insufficientAvailableStock,
+          );
+        }
+        if (requestedBase > orderedBase - deliveredBase + 0.000001) {
           throw Exception('الكمية المسلمة تتجاوز الكمية المتبقية');
         }
+        final stockIdentity = (
+          stockItem.inventoryId,
+          itemType.value,
+          stockItem.unitId,
+          stockItem.identityKind.value,
+        );
+        requestedByStockIdentity.update(
+          stockIdentity,
+          (quantity) => quantity + requestedBase,
+          ifAbsent: () => requestedBase,
+        );
+        availableByStockIdentity[stockIdentity] =
+            availability.availableBaseQuantity;
+        resolvedItemsById[entry.key] = stockItem;
         deliveredById[entry.key] = deliveredBase;
         deliveredUnitsById[entry.key] = (row['deliveredQuantity'] as num)
             .toDouble();
       }
+      for (final entry in requestedByStockIdentity.entries) {
+        if (entry.value > availableByStockIdentity[entry.key]! + 0.000001) {
+          throw const SalesDeliveryException(
+            SalesDeliveryFailure.insufficientAvailableStock,
+          );
+        }
+      }
       final deliveryId = _id('delivery');
       final deliveryNumber = _number('DL');
-      var revenueTotal = 0.0;
-      var cogsTotal = 0.0;
       await txn.insert('sales_deliveries', {
         'id': deliveryId,
         'deliveryNumber': deliveryNumber,
@@ -684,6 +1474,7 @@ class SalesLocalDataSource {
         'warehouseId': warehouseId,
         'deliveryDate': deliveryDate.millisecondsSinceEpoch,
         'status': DeliveryDispatchStatus.pending.value,
+        'inventoryPosted': 0,
         'dispatchDate': null,
         'driverName': null,
         'vehicleNumber': null,
@@ -698,80 +1489,14 @@ class SalesLocalDataSource {
       for (final item in items) {
         final row = byId[item.id];
         if (row == null) throw Exception('صنف التسليم غير موجود في الأمر');
-        final ordered = (row['quantity'] as num).toDouble();
-        final delivered = deliveredUnitsById[item.id]!;
-        if (item.quantity <= 0 || item.quantity > ordered - delivered) {
-          throw Exception('الكمية المسلمة تتجاوز الكمية المتبقية');
-        }
         final conversionFactor = (row['unitConversionFactor'] as num)
             .toDouble();
-        final baseQuantity = item.quantity * conversionFactor;
+        final baseQuantity = requested[item.id]! * conversionFactor;
         if (!baseQuantity.isFinite || baseQuantity <= 0) {
           throw Exception('الكمية الأساسية للتسليم غير صالحة');
         }
-        final type = row['itemType'] == 'PRODUCT'
-            ? StockItemType.product
-            : StockItemType.rawMaterial;
-        final stockItem = await _resolveItem(
-          txn,
-          row['productId'] as String? ?? row['itemId'] as String,
-          type,
-          variantId: row['variantId'] as String?,
-          identityKind: InventoryIdentityKindValue.parse(
-            row['inventoryIdentityKind'],
-          ),
-          unitId: row['baseUnitId'] as String? ?? row['unitId'] as String,
-        );
-        final valuationRows = await txn.query(
-          'inventory_valuations',
-          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-          whereArgs: [warehouseId, stockItem.inventoryId, type.value],
-          limit: 1,
-        );
-        if (valuationRows.isEmpty) {
-          throw Exception('تقييم المخزون غير متاح لحساب تكلفة البضاعة');
-        }
-        final unitCogs = (valuationRows.first['averageCost'] as num).toDouble();
-        if (!unitCogs.isFinite || unitCogs < 0) {
-          throw Exception('تقييم تكلفة المخزون غير صالح');
-        }
-        if (valuationRows.single['unitId'] != stockItem.unitId ||
-            valuationRows.single['variantId'] != stockItem.variantId ||
-            InventoryIdentityKindValue.parse(
-                  valuationRows.single['inventoryIdentityKind'],
-                ) !=
-                stockItem.identityKind) {
-          throw Exception('هوية تقييم المخزون لا تطابق بند أمر البيع');
-        }
-        cogsTotal += baseQuantity * unitCogs;
-        if (!cogsTotal.isFinite) {
-          throw Exception('إجمالي تكلفة البضاعة غير صالح');
-        }
-        await _accounting.consumeInventoryValueWithinTransaction(
-          executor: txn,
-          warehouseId: warehouseId,
-          itemId: stockItem.inventoryId,
-          itemType: type.value,
-          quantity: baseQuantity,
-          productId: stockItem.baseProductId,
-          variantId: stockItem.variantId,
-          identityKind: stockItem.identityKind,
-          unitId: stockItem.unitId,
-        );
+        final stockItem = resolvedItemsById[item.id]!;
         final lineTotal = (row['lineTotal'] as num?)?.toDouble() ?? 0;
-        revenueTotal += ordered == 0
-            ? 0
-            : item.quantity * (lineTotal / ordered);
-        if (!revenueTotal.isFinite) throw Exception('إجمالي المبيعات غير صالح');
-        await _stock.applyStockOutWithinTransaction(
-          executor: txn,
-          warehouseId: warehouseId,
-          item: stockItem,
-          quantity: baseQuantity,
-          date: deliveryDate,
-          reference: deliveryNumber,
-          notes: notes,
-        );
         await txn.insert('sales_delivery_items', {
           'id': _id('delivery-item'),
           'salesDeliveryId': deliveryId,
@@ -785,102 +1510,11 @@ class SalesLocalDataSource {
           'baseQuantity': baseQuantity,
           'inventoryIdentityKind': stockItem.identityKind.value,
           'identitySnapshotStatus': row['identitySnapshotStatus'],
-          'unitRevenue': ordered == 0 ? 0 : lineTotal / ordered,
-          'unitCogs': unitCogs,
+          'unitRevenue': lineTotal / (row['quantity'] as num).toDouble(),
           'notes': item.notes,
         });
-        await txn.update(
-          'sales_order_items',
-          {
-            'deliveredQuantity': delivered + item.quantity,
-            'deliveredBaseQuantity': deliveredById[item.id]! + baseQuantity,
-          },
-          where: 'id = ?',
-          whereArgs: [item.id],
-        );
-        deliveredById[item.id] = deliveredById[item.id]! + baseQuantity;
-        deliveredUnitsById[item.id] = delivered + item.quantity;
       }
-      final journalLines = <JournalLineInput>[];
-      if (revenueTotal > 0) {
-        final receivable =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['1200'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        final salesRevenue =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['4000'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        journalLines.addAll([
-          JournalLineInput(accountId: receivable, debit: revenueTotal),
-          JournalLineInput(accountId: salesRevenue, credit: revenueTotal),
-        ]);
-      }
-      if (cogsTotal > 0) {
-        final cogs =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['5000'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        final inventory =
-            (await txn.query(
-                  'accounts',
-                  columns: ['id'],
-                  where: 'code = ? AND active = 1',
-                  whereArgs: ['1100'],
-                  limit: 1,
-                )).single['id']
-                as String;
-        journalLines.add(JournalLineInput(accountId: cogs, debit: cogsTotal));
-        journalLines.add(
-          JournalLineInput(accountId: inventory, credit: cogsTotal),
-        );
-      }
-      if (journalLines.isNotEmpty) {
-        await _accounting.postJournalWithinTransaction(
-          executor: txn,
-          date: deliveryDate,
-          description: 'بيع وتسليم $deliveryNumber',
-          referenceType: 'SALES_DELIVERY',
-          referenceId: deliveryId,
-          partyType: 'CUSTOMER',
-          partyId: persistedCustomerId,
-          lines: journalLines,
-        );
-      }
-      final totals = await txn.query(
-        'sales_order_items',
-        where: 'salesOrderId = ?',
-        whereArgs: [order.id],
-      );
-      final complete = totals.every(
-        (row) =>
-            (row['deliveredBaseQuantity'] as num).toDouble() + 0.000001 >=
-            (row['baseQuantity'] as num).toDouble(),
-      );
-      await txn.update(
-        'sales_orders',
-        {
-          'status': complete ? 'FULLY_DELIVERED' : 'PARTIALLY_DELIVERED',
-          'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        },
-        where: 'id = ?',
-        whereArgs: [order.id],
-      );
+      await _recordDeliveryReservationAudit(txn, deliveryId);
       return SalesDelivery.fromMap(
         (await txn.query(
           'sales_deliveries',
@@ -897,8 +1531,8 @@ class SalesLocalDataSource {
     _security.require('SALES_VIEW');
     return (await (await _db).query(
       'warehouses',
-      where: 'state = ?',
-      whereArgs: ['active'],
+      where: 'state = ? AND purpose = ?',
+      whereArgs: ['active', WarehousePurpose.sellable.value],
       orderBy: 'name ASC',
     )).map(Warehouse.fromMap).toList();
   }
@@ -994,6 +1628,7 @@ class SalesLocalDataSource {
             lineTotal: (m['lineTotal'] as num?)?.toDouble() ?? 0,
             deliveredQuantity:
                 (m['deliveredQuantity'] as num?)?.toDouble() ?? 0,
+            invoicedQuantity: (m['invoicedQuantity'] as num?)?.toDouble() ?? 0,
             notes: m['notes'] as String?,
           ),
         )
@@ -1062,6 +1697,89 @@ class SalesLocalDataSource {
     return value.toDouble();
   }
 
+  Future<DeliveryStockAvailability> _deliveryStockAvailability(
+    DatabaseExecutor db, {
+    required String warehouseId,
+    required StockItemOption item,
+    String? salesOrderItemId,
+  }) async {
+    await _validateWarehouse(db, warehouseId);
+
+    final balanceRows = await db.query(
+      'stock_balances',
+      columns: ['quantity', 'unitId'],
+      where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+      whereArgs: [warehouseId, item.inventoryId, item.type.value],
+      limit: 1,
+    );
+    var physicalQuantity = 0.0;
+    if (balanceRows.isNotEmpty) {
+      if (balanceRows.single['unitId'] != item.unitId) {
+        throw const SalesDeliveryException(
+          SalesDeliveryFailure.stockUnitMismatch,
+        );
+      }
+      physicalQuantity = (balanceRows.single['quantity'] as num).toDouble();
+    }
+    final reservedQuantity = await _activeReservedQuantity(
+      db,
+      warehouseId: warehouseId,
+      item: item,
+    );
+    final orderReservedQuantity = salesOrderItemId == null
+        ? 0.0
+        : await _activeReservedQuantity(
+            db,
+            item: item,
+            salesOrderItemId: salesOrderItemId,
+          );
+    return DeliveryStockAvailability(
+      physicalBaseQuantity: physicalQuantity,
+      reservedBaseQuantity: reservedQuantity,
+      orderReservedBaseQuantity: orderReservedQuantity,
+    );
+  }
+
+  Future<double> _activeReservedQuantity(
+    DatabaseExecutor db, {
+    required StockItemOption item,
+    String? warehouseId,
+    String? salesOrderItemId,
+  }) async {
+    final conditions = <String>[
+      'sd.inventoryPosted = 0',
+      "sd.status IN ('PENDING', 'DISPATCHED', 'IN_TRANSIT')",
+      'sdi.productId = ?',
+      'sdi.variantId IS ?',
+      'sdi.inventoryIdentityKind = ?',
+      'sdi.baseUnitId = ?',
+      'soi.itemType = ?',
+    ];
+    final arguments = <Object?>[
+      item.baseProductId,
+      item.variantId,
+      item.identityKind.value,
+      item.unitId,
+      item.type.value,
+    ];
+    if (warehouseId != null) {
+      conditions.add('sd.warehouseId = ?');
+      arguments.add(warehouseId);
+    }
+    if (salesOrderItemId != null) {
+      conditions.add('sdi.salesOrderItemId = ?');
+      arguments.add(salesOrderItemId);
+    }
+    final rows = await db.rawQuery('''
+      SELECT COALESCE(SUM(sdi.baseQuantity), 0) AS reservedQuantity
+      FROM sales_delivery_items sdi
+      JOIN sales_deliveries sd ON sd.id = sdi.salesDeliveryId
+      JOIN sales_order_items soi ON soi.id = sdi.salesOrderItemId
+      WHERE ${conditions.join(' AND ')}
+    ''', arguments);
+    return (rows.single['reservedQuantity'] as num).toDouble();
+  }
+
   Future<void> _validatePersistedDeliveryQuantities(
     DatabaseExecutor db,
     String orderId,
@@ -1073,6 +1791,8 @@ class SalesLocalDataSource {
       FROM sales_delivery_items sdi
       JOIN sales_deliveries sd ON sd.id = sdi.salesDeliveryId
       WHERE sd.salesOrderId = ?
+        AND sd.inventoryPosted = 1
+        AND sd.status != 'CANCELLED'
       GROUP BY sdi.salesOrderItemId
       ''',
       [orderId],
@@ -1250,11 +1970,13 @@ class SalesLocalDataSource {
     if ((await db.query(
       'warehouses',
       columns: ['id'],
-      where: 'id = ? AND state = ?',
-      whereArgs: [id, 'active'],
+      where: 'id = ? AND state = ? AND purpose = ?',
+      whereArgs: [id, 'active', WarehousePurpose.sellable.value],
       limit: 1,
     )).isEmpty) {
-      throw Exception('المخزن غير موجود أو غير نشط');
+      throw const SalesDeliveryException(
+        SalesDeliveryFailure.warehouseUnavailable,
+      );
     }
   }
 
@@ -1329,6 +2051,7 @@ class SalesLocalDataSource {
     if (key == 'salesOrderId') {
       values['deliveredQuantity'] = v.deliveredQuantity;
       values['deliveredBaseQuantity'] = v.deliveredBaseQuantity;
+      values['invoicedQuantity'] = v.invoicedQuantity;
     }
     return values;
   }

@@ -1,25 +1,30 @@
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 
+import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/production_stage.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
 import 'package:furnexa/features/production/data/repositories/production_repository_impl.dart';
 import 'package:furnexa/features/production/domain/entities/production_entities.dart';
 import 'package:furnexa/features/production/domain/repositories/production_repository.dart';
 import 'package:furnexa/features/raw_materials_products/domain/entities/item_entities.dart';
+import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 import 'package:furnexa/features/warehouses_stock/data/repositories/warehouses_stock_repository_impl.dart';
 import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 
 class ProductionPage extends StatefulWidget {
-  const ProductionPage({super.key, this.initialOrderId});
+  const ProductionPage({super.key, this.initialOrderId, this.security});
 
   final String? initialOrderId;
+  final SecurityLocalDataSource? security;
   @override
   State<ProductionPage> createState() => _ProductionPageState();
 }
 
 class _ProductionPageState extends State<ProductionPage>
     with SingleTickerProviderStateMixin {
+  late final SecurityLocalDataSource _security =
+      widget.security ?? SecurityLocalDataSource();
   final ProductionRepository repository = ProductionRepositoryImpl();
   late final TabController tabs;
   final TextEditingController orderSearchController = TextEditingController();
@@ -33,6 +38,9 @@ class _ProductionPageState extends State<ProductionPage>
   Product? productFilter;
   bool loading = true;
   bool newestFirst = true;
+
+  bool get _canView => _security.can('PRODUCTION_VIEW');
+  bool get _canEdit => _security.can('PRODUCTION_EDIT');
 
   List<ProductionOrder> get filteredOrders {
     final query = orderSearchController.text.trim().toLowerCase();
@@ -107,7 +115,7 @@ class _ProductionPageState extends State<ProductionPage>
   void initState() {
     super.initState();
     tabs = TabController(length: 2, vsync: this);
-    load();
+    if (_canView) load();
   }
 
   @override
@@ -119,6 +127,7 @@ class _ProductionPageState extends State<ProductionPage>
   }
 
   Future<void> load() async {
+    if (!_canView) return;
     setState(() => loading = true);
     final result = await Future.wait([
       repository.activeProducts(),
@@ -158,21 +167,31 @@ class _ProductionPageState extends State<ProductionPage>
   ).showSnackBar(SnackBar(content: Text(_productionActionError(value))));
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('الإنتاج'),
-      bottom: TabBar(
-        controller: tabs,
-        tabs: const [
-          Tab(text: 'أوامر الإنتاج'),
-          Tab(text: 'مسارات الإنتاج'),
-        ],
+  Widget build(BuildContext context) {
+    if (!_canView) {
+      return const Scaffold(
+        body: Center(child: Text('ليس لديك صلاحية لعرض الإنتاج')),
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('الإنتاج'),
+        bottom: TabBar(
+          controller: tabs,
+          tabs: const [
+            Tab(text: 'أوامر الإنتاج'),
+            Tab(text: 'مسارات الإنتاج'),
+          ],
+        ),
       ),
-    ),
-    body: loading
-        ? const Center(child: CircularProgressIndicator())
-        : TabBarView(controller: tabs, children: [ordersView(), routesView()]),
-  );
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : TabBarView(
+              controller: tabs,
+              children: [ordersView(), routesView()],
+            ),
+    );
+  }
 
   Widget ordersView() {
     final filtered = filteredOrders;
@@ -200,11 +219,12 @@ class _ProductionPageState extends State<ProductionPage>
                         ),
                       ),
                       const SizedBox(width: 12),
-                      FilledButton.icon(
-                        onPressed: createOrder,
-                        icon: const Icon(Icons.add),
-                        label: const Text('أمر جديد'),
-                      ),
+                      if (_canEdit)
+                        FilledButton.icon(
+                          onPressed: createOrder,
+                          icon: const Icon(Icons.add),
+                          label: const Text('أمر جديد'),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 12),
@@ -341,11 +361,12 @@ class _ProductionPageState extends State<ProductionPage>
                         ),
                       ),
                       const SizedBox(width: 12),
-                      FilledButton.icon(
-                        onPressed: () => editRoute(),
-                        icon: const Icon(Icons.add),
-                        label: const Text('مسار جديد'),
-                      ),
+                      if (_canEdit)
+                        FilledButton.icon(
+                          onPressed: () => editRoute(),
+                          icon: const Icon(Icons.add),
+                          label: const Text('مسار جديد'),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 12),
@@ -534,29 +555,30 @@ class _ProductionPageState extends State<ProductionPage>
                 ),
               ),
               const SizedBox(width: 12),
-              Column(
-                children: [
-                  if (order.status == ProductionOrderStatus.draft)
-                    FilledButton.tonal(
-                      onPressed: () =>
-                          change(() => repository.planOrder(order.id)),
-                      child: const Text('تخطيط'),
-                    ),
-                  if (order.status == ProductionOrderStatus.planned)
-                    FilledButton.tonal(
-                      onPressed: () =>
-                          change(() => repository.startOrder(order.id)),
-                      child: const Text('بدء'),
-                    ),
-                  if (order.status == ProductionOrderStatus.draft ||
-                      order.status == ProductionOrderStatus.planned)
-                    TextButton(
-                      onPressed: () =>
-                          change(() => repository.cancelOrder(order.id)),
-                      child: const Text('إلغاء'),
-                    ),
-                ],
-              ),
+              if (_canEdit)
+                Column(
+                  children: [
+                    if (order.status == ProductionOrderStatus.draft)
+                      FilledButton.tonal(
+                        onPressed: () =>
+                            change(() => repository.planOrder(order.id)),
+                        child: const Text('تخطيط'),
+                      ),
+                    if (order.status == ProductionOrderStatus.planned)
+                      FilledButton.tonal(
+                        onPressed: () =>
+                            change(() => repository.startOrder(order.id)),
+                        child: const Text('بدء'),
+                      ),
+                    if (order.status == ProductionOrderStatus.draft ||
+                        order.status == ProductionOrderStatus.planned)
+                      TextButton(
+                        onPressed: () =>
+                            change(() => repository.cancelOrder(order.id)),
+                        child: const Text('إلغاء'),
+                      ),
+                  ],
+                ),
             ],
           ),
         ),
@@ -571,7 +593,7 @@ class _ProductionPageState extends State<ProductionPage>
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: InkWell(
-        onTap: () => editRoute(route),
+        onTap: _canEdit ? () => editRoute(route) : null,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -778,8 +800,11 @@ class _ProductionPageState extends State<ProductionPage>
   Future<void> openOrder(ProductionOrder order) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) =>
-            ProductionOrderDetailsPage(repository: repository, order: order),
+        builder: (_) => ProductionOrderDetailsPage(
+          repository: repository,
+          order: order,
+          security: _security,
+        ),
       ),
     );
     await load();
@@ -1344,10 +1369,12 @@ class ProductionOrderDetailsPage extends StatefulWidget {
   const ProductionOrderDetailsPage({
     required this.repository,
     required this.order,
+    this.security,
     super.key,
   });
   final ProductionRepository repository;
   final ProductionOrder order;
+  final SecurityLocalDataSource? security;
   @override
   State<ProductionOrderDetailsPage> createState() =>
       _ProductionOrderDetailsPageState();
@@ -1355,6 +1382,8 @@ class ProductionOrderDetailsPage extends StatefulWidget {
 
 class _ProductionOrderDetailsPageState
     extends State<ProductionOrderDetailsPage> {
+  late final SecurityLocalDataSource _security =
+      widget.security ?? SecurityLocalDataSource();
   late ProductionOrder order = widget.order;
   List<ProductionMaterialRequirement> requirements = [];
   List<ProductionMaterialRecord> consumptions = [];
@@ -1364,6 +1393,9 @@ class _ProductionOrderDetailsPageState
   List<Warehouse> warehouses = [];
   bool bomValid = false;
   bool loading = true;
+
+  bool get _canView => _security.can('PRODUCTION_VIEW');
+  bool get _canEdit => _security.can('PRODUCTION_EDIT');
 
   bool get routeSnapshotValid =>
       order.routeId != null &&
@@ -1385,10 +1417,11 @@ class _ProductionOrderDetailsPageState
   @override
   void initState() {
     super.initState();
-    load();
+    if (_canView) load();
   }
 
   Future<void> load() async {
+    if (!_canView) return;
     final result = await Future.wait([
       widget.repository.getOrder(order.id),
       widget.repository.requirements(order.id),
@@ -1424,7 +1457,7 @@ class _ProductionOrderDetailsPageState
         .where((value) => value.id == order.variantId)
         .firstOrNull;
     final activeStage = currentStage;
-    if (order.status == ProductionOrderStatus.draft) {
+    if (_canEdit && order.status == ProductionOrderStatus.draft) {
       actions.add(
         FilledButton(
           onPressed: () => change(() => widget.repository.planOrder(order.id)),
@@ -1432,7 +1465,7 @@ class _ProductionOrderDetailsPageState
         ),
       );
     }
-    if (order.status == ProductionOrderStatus.planned) {
+    if (_canEdit && order.status == ProductionOrderStatus.planned) {
       actions.add(
         FilledButton(
           onPressed: bomValid && routeSnapshotValid
@@ -1442,7 +1475,7 @@ class _ProductionOrderDetailsPageState
         ),
       );
     }
-    if (order.status == ProductionOrderStatus.inProgress) {
+    if (_canEdit && order.status == ProductionOrderStatus.inProgress) {
       actions.addAll([
         FilledButton.icon(
           onPressed: recordOutput,
@@ -1454,6 +1487,11 @@ class _ProductionOrderDetailsPageState
       ]);
     }
 
+    if (!_canView) {
+      return const Scaffold(
+        body: Center(child: Text('ليس لديك صلاحية لعرض الإنتاج')),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: Text(order.orderNumber)),
       body: loading
@@ -1550,7 +1588,8 @@ class _ProductionOrderDetailsPageState
                                   _requirementStatusLabel(requirement.status),
                                 ),
                               ),
-                              if (order.status ==
+                              if (_canEdit &&
+                                  order.status ==
                                       ProductionOrderStatus.inProgress &&
                                   requirement.remainingQuantity > 0)
                                 IconButton(
@@ -1621,6 +1660,7 @@ class _ProductionOrderDetailsPageState
     final isCurrent = currentStage?.id == stage.id;
     final previousComplete = _previousStagesComplete(stage);
     final canWork =
+        _canEdit &&
         order.status == ProductionOrderStatus.inProgress &&
         isCurrent &&
         previousComplete;
@@ -1804,7 +1844,7 @@ class _ProductionOrderDetailsPageState
     );
     if (!mounted) return;
     if (allowedWarehouses.isEmpty) {
-      error('المخزن غير متاح ضمن مصنع المرحلة النهائية أو نطاق صلاحيتك');
+      error(AppLocalizations.of(context).productionOutputNoEligibleWarehouse);
       return;
     }
     final remainingBaseQuantity = order.remainingQuantity;
@@ -2074,9 +2114,13 @@ class _ProductionOutputFormState extends State<ProductionOutputForm> {
     } catch (error) {
       if (!mounted) return;
       setState(() => submitting = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(_productionOutputError(error))));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _productionOutputError(error, AppLocalizations.of(context)),
+          ),
+        ),
+      );
     }
   }
 }
@@ -2484,8 +2528,11 @@ String _productionActionError(Object error) {
   return message;
 }
 
-String _productionOutputError(Object error) {
+String _productionOutputError(Object error, AppLocalizations localizations) {
   final message = error.toString().replaceFirst('Exception: ', '');
+  if (message.contains('sellable warehouse')) {
+    return localizations.productionOutputSellableWarehouseRequired;
+  }
   if (message.contains('ليس لديك صلاحية') ||
       message.contains('النطاق المسموح')) {
     return 'لا توجد صلاحية لتنفيذ العملية';

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/core/shared/ui/form_field.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_form.dart';
 import 'package:furnexa/core/shared/widgets/detail/furnexa_detail.dart';
 import 'package:furnexa/core/theme/app_theme.dart';
+import 'package:furnexa/features/raw_materials_products/data/datasources/raw_materials_products_local_data_source.dart';
 import 'package:furnexa/features/raw_materials_products/data/repositories/raw_materials_products_repository_impl.dart';
 import 'package:furnexa/features/raw_materials_products/domain/entities/item_entities.dart';
 import 'package:furnexa/features/raw_materials_products/domain/repositories/raw_materials_products_repository.dart';
@@ -108,6 +110,9 @@ class _RawMaterialsProductsPageState extends State<RawMaterialsProductsPage>
   }
 
   String _databaseMessage(Object error) {
+    if (error is RawMaterialUnitChangeBlockedException) {
+      return AppLocalizations.of(context).rawMaterialUnitChangeBlocked;
+    }
     final text = error.toString().toLowerCase();
     if (text.contains('unique') || text.contains('code')) {
       return 'الكود أو القيمة مستخدمة مسبقاً';
@@ -414,7 +419,7 @@ class _RawMaterialsProductsPageState extends State<RawMaterialsProductsPage>
         ),
         trailing: Wrap(
           children: [
-            if (widget.security.can('PRODUCTS_EDIT'))
+            if (widget.security.can('PRODUCTS_VIEW'))
               IconButton(
                 tooltip: 'التفاصيل',
                 onPressed: () => _productProfile(v),
@@ -874,11 +879,15 @@ class _ItemForm extends StatefulWidget {
     required this.fields,
     required this.selects,
     this.optionalFields = const {},
+    this.positiveNumericFields = const {},
+    this.onSubmit,
   });
   final String title;
   final List<(String, String, String?)> fields;
   final List<_SelectData> selects;
   final Set<String> optionalFields;
+  final Set<String> positiveNumericFields;
+  final Future<String?> Function(Map<String, String> values)? onSubmit;
   @override
   State<_ItemForm> createState() => _ItemFormState();
 }
@@ -887,6 +896,8 @@ class _ItemFormState extends State<_ItemForm> {
   final _key = GlobalKey<FormState>();
   final _controllers = <String, TextEditingController>{};
   final _values = <String, String?>{};
+  bool _saving = false;
+  String? _submitError;
 
   @override
   void initState() {
@@ -918,7 +929,8 @@ class _ItemFormState extends State<_ItemForm> {
           cancelLabel: 'إلغاء',
           saveLabel: 'حفظ',
           onCancel: () => Navigator.pop(context),
-          onSave: () {
+          saveLoading: _saving,
+          onSave: () async {
             if (!(_key.currentState?.validate() ?? false)) return;
             final result = <String, String>{
               for (final entry in _controllers.entries)
@@ -926,6 +938,27 @@ class _ItemFormState extends State<_ItemForm> {
               for (final entry in _values.entries)
                 if (entry.value != null) entry.key: entry.value!,
             };
+            final onSubmit = widget.onSubmit;
+            if (onSubmit == null) {
+              Navigator.pop(context, result);
+              return;
+            }
+            setState(() {
+              _saving = true;
+              _submitError = null;
+            });
+            String? error;
+            try {
+              error = await onSubmit(result);
+            } catch (_) {
+              error = AppLocalizations.of(context).actionFailed;
+            }
+            if (!mounted) return;
+            setState(() => _saving = false);
+            if (error != null) {
+              setState(() => _submitError = error);
+              return;
+            }
             Navigator.pop(context, result);
           },
           sections: [
@@ -945,6 +978,16 @@ class _ItemFormState extends State<_ItemForm> {
                       }
                       if (value == null || value.trim().isEmpty) {
                         return 'هذا الحقل مطلوب';
+                      }
+                      if (widget.positiveNumericFields.contains(field.$1)) {
+                        final numeric = double.tryParse(value.trim());
+                        if (numeric == null ||
+                            !numeric.isFinite ||
+                            numeric <= 0) {
+                          return AppLocalizations.of(
+                            context,
+                          ).bomQuantityInvalid;
+                        }
                       }
                       if (const {
                         'length',
@@ -983,6 +1026,13 @@ class _ItemFormState extends State<_ItemForm> {
                         : null,
                   ),
                 ),
+                if (_submitError != null)
+                  Text(
+                    _submitError!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
               ],
             ),
           ],
@@ -1124,29 +1174,33 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
               widget.colors.where((c) => c.id == v.colorId).firstOrNull?.name ??
                   'بدون لون',
             ),
-            trailing: Wrap(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.edit_outlined),
-                  onPressed: () => _variantForm(v),
-                ),
-                IconButton(
-                  icon: Icon(v.active ? Icons.toggle_on : Icons.toggle_off),
-                  onPressed: () async {
-                    await widget.repository.setActive(
-                      'product_variants',
-                      v.id,
-                      !v.active,
-                    );
-                    await _load();
-                  },
-                ),
-              ],
-            ),
+            trailing: widget.canEdit
+                ? Wrap(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => _variantForm(v),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          v.active ? Icons.toggle_on : Icons.toggle_off,
+                        ),
+                        onPressed: () async {
+                          await widget.repository.setActive(
+                            'product_variants',
+                            v.id,
+                            !v.active,
+                          );
+                          await _load();
+                        },
+                      ),
+                    ],
+                  )
+                : null,
           ),
         )
         .toList(),
-    () => _variantForm(),
+    widget.canEdit ? () => _variantForm() : null,
   );
   Future<void> _variantForm([ProductVariant? current]) async {
     final v = await showDialog<Map<String, String>>(
@@ -1265,20 +1319,24 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
         subtitle: Text(
           '1 ${unit?.abbreviation ?? ''} = ${conversion.factorToBase} ${widget.units.where((value) => value.id == widget.product.unitId).firstOrNull?.abbreviation ?? widget.product.unitId}',
         ),
-        trailing: IconButton(
-          tooltip: conversion.active ? 'تعطيل' : 'تفعيل',
-          icon: Icon(conversion.active ? Icons.toggle_on : Icons.toggle_off),
-          onPressed: () async {
-            await widget.repository.setUnitConversionActive(
-              conversion.id,
-              !conversion.active,
-            );
-            await _load();
-          },
-        ),
+        trailing: widget.canEdit
+            ? IconButton(
+                tooltip: conversion.active ? 'تعطيل' : 'تفعيل',
+                icon: Icon(
+                  conversion.active ? Icons.toggle_on : Icons.toggle_off,
+                ),
+                onPressed: () async {
+                  await widget.repository.setUnitConversionActive(
+                    conversion.id,
+                    !conversion.active,
+                  );
+                  await _load();
+                },
+              )
+            : null,
       );
     }).toList(),
-    () => _unitConversionForm(),
+    widget.canEdit ? () => _unitConversionForm() : null,
   );
 
   Future<void> _unitConversionForm([ProductUnitConversion? current]) async {
@@ -1378,6 +1436,16 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
         SnackBar(content: Text(message.replaceFirst('Exception: ', ''))),
       );
 
+  void _showBomFeedback(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? AppTheme.error : AppTheme.success,
+      ),
+    );
+  }
+
   String _stateLabel(ProductState state) =>
       state == ProductState.finished ? 'متشطب' : 'غير متشطب';
 
@@ -1393,36 +1461,38 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
           ),
         )
         .toList(),
-    () async {
-      final v = await showDialog<Map<String, String>>(
-        context: context,
-        builder: (_) => _ItemForm(
-          title: 'الأبعاد',
-          fields: [
-            ('length', 'الطول', null),
-            ('width', 'العرض', null),
-            ('height', 'الارتفاع', null),
-            ('unit', 'وحدة القياس', null),
-          ],
-          selects: const [],
-          optionalFields: const {'length', 'width', 'height', 'unit'},
-        ),
-      );
-      if (v == null) return;
-      try {
-        await widget.repository.saveDimensions(
-          ProductDimension(
-            id: dimensions.firstOrNull?.id ?? _id('dimension'),
-            productId: widget.product.id,
-            length: double.tryParse(v['length'] ?? ''),
-            width: double.tryParse(v['width'] ?? ''),
-            height: double.tryParse(v['height'] ?? ''),
-            unit: v['unit'],
-          ),
-        );
-        await _load();
-      } catch (_) {}
-    },
+    widget.canEdit
+        ? () async {
+            final v = await showDialog<Map<String, String>>(
+              context: context,
+              builder: (_) => _ItemForm(
+                title: 'الأبعاد',
+                fields: [
+                  ('length', 'الطول', null),
+                  ('width', 'العرض', null),
+                  ('height', 'الارتفاع', null),
+                  ('unit', 'وحدة القياس', null),
+                ],
+                selects: const [],
+                optionalFields: const {'length', 'width', 'height', 'unit'},
+              ),
+            );
+            if (v == null) return;
+            try {
+              await widget.repository.saveDimensions(
+                ProductDimension(
+                  id: dimensions.firstOrNull?.id ?? _id('dimension'),
+                  productId: widget.product.id,
+                  length: double.tryParse(v['length'] ?? ''),
+                  width: double.tryParse(v['width'] ?? ''),
+                  height: double.tryParse(v['height'] ?? ''),
+                  unit: v['unit'],
+                ),
+              );
+              await _load();
+            } catch (_) {}
+          }
+        : null,
   );
   Widget _bomView() => _profileList(
     'مكونات المنتج',
@@ -1438,30 +1508,51 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
           '${material?.name ?? '-'} • ${b.quantity} ${unit?.name ?? ''}',
         ),
         subtitle: Text(b.notes ?? ''),
-        trailing: Wrap(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: () => _bomForm(b),
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline),
-              onPressed: () async {
-                await widget.repository.deleteBomItem(b.id);
-                await _load();
-              },
-            ),
-          ],
-        ),
+        trailing: widget.canEdit
+            ? Wrap(
+                children: [
+                  IconButton(
+                    tooltip: AppLocalizations.of(context).edit,
+                    icon: const Icon(Icons.edit_outlined),
+                    onPressed: () => _bomForm(b),
+                  ),
+                  IconButton(
+                    tooltip: AppLocalizations.of(context).deleteBomComponent,
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _confirmDeleteBomItem(b),
+                  ),
+                ],
+              )
+            : null,
       );
     }).toList(),
-    () => _bomForm(),
+    widget.canEdit ? () => _bomForm() : null,
   );
+
+  String _bomSaveError(Object error, AppLocalizations l10n) {
+    if (error is ArgumentError || error is FormatException) {
+      return l10n.bomQuantityInvalid;
+    }
+    final message = error.toString().toLowerCase();
+    if (message.contains('unique constraint failed') &&
+        message.contains('product_bom_items')) {
+      return l10n.bomDuplicateComponent;
+    }
+    if (message.contains('الخامة') ||
+        message.contains('raw material') ||
+        message.contains('المنتج')) {
+      return l10n.bomMaterialUnavailable;
+    }
+    return l10n.actionFailed;
+  }
+
   Future<void> _bomForm([BomItem? current]) async {
+    final l10n = AppLocalizations.of(context);
     final v = await showDialog<Map<String, String>>(
       context: context,
       builder: (_) => _ItemForm(
         title: current == null ? 'مكون جديد' : 'تعديل المكون',
+        positiveNumericFields: const {'quantity'},
         fields: [
           ('quantity', 'الكمية', current?.quantity.toString()),
           ('notes', 'الملاحظات', current?.notes),
@@ -1474,21 +1565,66 @@ class _ProductProfileDialogState extends State<_ProductProfileDialog> {
               x.id: x.name,
           }, current?.rawMaterialId),
         ],
+        onSubmit: (values) async {
+          try {
+            await widget.repository.saveBomItem(
+              BomItem(
+                id: current?.id ?? _id('bom'),
+                productId: widget.product.id,
+                rawMaterialId: values['rawMaterialId']!,
+                quantity: double.parse(values['quantity']!),
+                notes: values['notes'],
+              ),
+            );
+            return null;
+          } catch (error) {
+            return _bomSaveError(error, l10n);
+          }
+        },
       ),
     );
     if (v == null) return;
     try {
-      await widget.repository.saveBomItem(
-        BomItem(
-          id: current?.id ?? _id('bom'),
-          productId: widget.product.id,
-          rawMaterialId: v['rawMaterialId']!,
-          quantity: double.parse(v['quantity']!),
-          notes: v['notes'],
-        ),
-      );
       await _load();
     } catch (_) {}
+  }
+
+  Future<void> _confirmDeleteBomItem(BomItem item) async {
+    if (!widget.canEdit) return;
+    final l10n = AppLocalizations.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.bomComponentDeleteTitle),
+        content: Text(
+          l10n.bomComponentDeleteConfirmation(
+            widget.materials
+                    .where((material) => material.id == item.rawMaterialId)
+                    .firstOrNull
+                    ?.name ??
+                item.rawMaterialId,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(l10n.deleteBomComponent),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await widget.repository.deleteBomItem(item.id);
+      await _load();
+      _showBomFeedback(l10n.bomComponentDeleted);
+    } catch (_) {
+      _showBomFeedback(l10n.actionFailed, isError: true);
+    }
   }
 
   Widget _profileList(String title, List<Widget> children, VoidCallback? add) =>

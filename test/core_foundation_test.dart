@@ -30,6 +30,23 @@ void main() {
       expect(first.path, equals(second.path));
     });
 
+    test(
+      'concurrent database initialization returns one open database',
+      () async {
+        final databases = await Future.wait([
+          FurnexaDatabase.instance.database,
+          FurnexaDatabase.instance.database,
+          FurnexaDatabase.instance.database,
+        ]);
+
+        expect(databases.every((database) => database.isOpen), isTrue);
+        expect(
+          databases.map((database) => database.path).toSet(),
+          hasLength(1),
+        );
+      },
+    );
+
     test('database version is correct', () async {
       final version = await FurnexaDatabase.instance.getDatabaseVersion();
 

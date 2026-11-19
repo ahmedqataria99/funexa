@@ -422,8 +422,11 @@ class _FactoryStructurePageState extends State<FactoryStructurePage> {
       return true;
     } catch (error) {
       final text = error.toString().toLowerCase();
+      final localizations = AppLocalizations.of(context);
       _errorMessage(
-        text.contains('unique') || text.contains('code')
+        text.contains('cannot change warehouse purpose')
+            ? localizations.warehousePurposeChangeBlocked
+            : text.contains('unique') || text.contains('code')
             ? 'هذا الكود مستخدم مسبقاً، اختر كوداً آخر'
             : 'تعذر حفظ البيانات، حاول مرة أخرى',
       );

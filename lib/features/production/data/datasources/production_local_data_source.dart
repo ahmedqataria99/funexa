@@ -38,6 +38,7 @@ class ProductionLocalDataSource {
   }
 
   Future<bool> productBomIsValid(String productId) async {
+    _security.require('PRODUCTION_VIEW');
     final db = await _db;
     final rows = await db.query(
       'product_bom_items',
@@ -48,7 +49,17 @@ class ProductionLocalDataSource {
   }
 
   Future<bool> orderBomIsValid(String orderId) async {
+    _security.require('PRODUCTION_VIEW');
     final db = await _db;
+    final orderRows = await db.query(
+      'production_orders',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [orderId],
+      limit: 1,
+    );
+    if (orderRows.isEmpty) return false;
+    await _requireOrderReadScope(db, orderId);
     final rows = await db.query(
       'production_order_bom_items',
       where: 'productionOrderId = ?',
@@ -90,39 +101,67 @@ class ProductionLocalDataSource {
     return true;
   }
 
-  Future<List<Product>> activeProducts() async => (await (await _db).query(
-    'products',
-    where: 'active = 1',
-    orderBy: 'name ASC',
-  )).map(Product.fromMap).toList();
+  Future<List<Product>> activeProducts() async {
+    _security.require('PRODUCTION_VIEW');
+    return (await (await _db).query(
+      'products',
+      where: 'active = 1',
+      orderBy: 'name ASC',
+    )).map(Product.fromMap).toList();
+  }
 
-  Future<List<ProductVariant>> activeVariants(String productId) async =>
-      (await (await _db).query(
-        'product_variants',
-        where: 'productId = ? AND active = 1',
-        whereArgs: [productId],
-        orderBy: 'name ASC',
-      )).map(ProductVariant.fromMap).toList();
+  Future<List<ProductVariant>> activeVariants(String productId) async {
+    _security.require('PRODUCTION_VIEW');
+    return (await (await _db).query(
+      'product_variants',
+      where: 'productId = ? AND active = 1',
+      whereArgs: [productId],
+      orderBy: 'name ASC',
+    )).map(ProductVariant.fromMap).toList();
+  }
 
-  Future<List<ProductionStage>> activeStages() async =>
-      (await (await _db).query(
-        'production_stages',
-        where: 'active = 1',
-        orderBy: 'sequence ASC, name ASC',
-      )).map(ProductionStage.fromMap).toList();
+  Future<List<ProductionStage>> activeStages() async {
+    _security.require('PRODUCTION_VIEW');
+    final session = _security.session!;
+    final stages = (await (await _db).query(
+      'production_stages',
+      where: 'active = 1',
+      orderBy: 'sequence ASC, name ASC',
+    )).map(ProductionStage.fromMap);
+    return stages
+        .where(
+          (stage) => session.canAccess(ScopeType.productionStage, stage.id),
+        )
+        .toList();
+  }
 
-  Future<List<Warehouse>> activeWarehouses() async => (await (await _db).query(
-    'warehouses',
-    where: 'state = ?',
-    whereArgs: ['active'],
-    orderBy: 'name ASC',
-  )).map(Warehouse.fromMap).toList();
+  Future<List<Warehouse>> activeWarehouses() async {
+    _security.require('PRODUCTION_VIEW');
+    final session = _security.session!;
+    final warehouses = (await (await _db).query(
+      'warehouses',
+      where: 'state = ?',
+      whereArgs: ['active'],
+      orderBy: 'name ASC',
+    )).map(Warehouse.fromMap);
+    return warehouses
+        .where(
+          (warehouse) => session.canAccess(ScopeType.warehouse, warehouse.id),
+        )
+        .toList();
+  }
 
   Future<List<Warehouse>> accessibleProductionWarehouses() async {
+    _security.require('PRODUCTION_VIEW');
     _security.require('PRODUCTION_EDIT');
     final session = _security.session;
     if (session == null) throw Exception('يجب تسجيل الدخول');
-    final warehouses = await activeWarehouses();
+    final warehouses = (await (await _db).query(
+      'warehouses',
+      where: 'state = ?',
+      whereArgs: ['active'],
+      orderBy: 'name ASC',
+    )).map(Warehouse.fromMap);
     return warehouses
         .where(
           (warehouse) => session.canAccess(ScopeType.warehouse, warehouse.id),
@@ -131,10 +170,12 @@ class ProductionLocalDataSource {
   }
 
   Future<List<Warehouse>> outputWarehouses(String orderId) async {
+    _security.require('PRODUCTION_VIEW');
     _security.require('PRODUCTION_EDIT');
     final session = _security.session;
     if (session == null) throw Exception('يجب تسجيل الدخول');
     final db = await _db;
+    await _requireOrderReadScope(db, orderId);
     final contextRows = await db.rawQuery(
       '''
       SELECT ps.factoryId
@@ -149,8 +190,12 @@ class ProductionLocalDataSource {
     if (contextRows.isEmpty) return const [];
     final rows = await db.query(
       'warehouses',
-      where: 'state = ? AND factoryId = ?',
-      whereArgs: ['active', contextRows.single['factoryId']],
+      where: 'state = ? AND factoryId = ? AND purpose = ?',
+      whereArgs: [
+        'active',
+        contextRows.single['factoryId'],
+        WarehousePurpose.sellable.value,
+      ],
       orderBy: 'name ASC',
     );
     return rows
@@ -162,6 +207,7 @@ class ProductionLocalDataSource {
   }
 
   Future<List<StockItemOption>> activeRawMaterials() async {
+    _security.require('PRODUCTION_VIEW');
     final rows = await (await _db).query(
       'raw_materials',
       where: 'active = 1',
@@ -182,21 +228,26 @@ class ProductionLocalDataSource {
   }
 
   Future<List<ProductionRoute>> routes() async {
+    _security.require('PRODUCTION_VIEW');
     final rows = await (await _db).query(
       'production_routes',
       orderBy: 'productId ASC',
     );
-    return Future.wait(rows.map(_route));
+    final routes = await Future.wait(rows.map(_route));
+    return routes.where((route) => route.stages.isNotEmpty).toList();
   }
 
   Future<ProductionRoute?> routeForProduct(String productId) async {
+    _security.require('PRODUCTION_VIEW');
     final rows = await (await _db).query(
       'production_routes',
       where: 'productId = ?',
       whereArgs: [productId],
       limit: 1,
     );
-    return rows.isEmpty ? null : _route(rows.first);
+    if (rows.isEmpty) return null;
+    final route = await _route(rows.first);
+    return route.stages.isEmpty ? null : route;
   }
 
   Future<void> saveRoute(String productId, List<String> stageIds) async {
@@ -451,6 +502,7 @@ class ProductionLocalDataSource {
   }
 
   Future<List<ProductionOrder>> orders([String query = '']) async {
+    _security.require('PRODUCTION_VIEW');
     final normalized = query.trim().toLowerCase();
     final db = await _db;
     final rows = await db.rawQuery(
@@ -463,10 +515,21 @@ class ProductionLocalDataSource {
     ''',
       [normalized, '%$normalized%', '%$normalized%', '%$normalized%'],
     );
-    return Future.wait(rows.map((row) => _order(db, row['id'] as String)));
+    final orders = <ProductionOrder>[];
+    for (final row in rows) {
+      final id = row['id'] as String;
+      if (!await _hasOrderReadScope(db, id)) continue;
+      orders.add(await _order(db, id, applyReadScopes: true));
+    }
+    return orders;
   }
 
-  Future<ProductionOrder> getOrder(String id) async => _order(await _db, id);
+  Future<ProductionOrder> getOrder(String id) async {
+    _security.require('PRODUCTION_VIEW');
+    final db = await _db;
+    await _requireOrderReadScope(db, id);
+    return _order(db, id, applyReadScopes: true);
+  }
 
   Future<void> planOrder(String id) async {
     _security.require('PRODUCTION_EDIT');
@@ -752,8 +815,9 @@ class ProductionLocalDataSource {
   Future<List<ProductionMaterialRequirement>> requirements(
     String orderId,
   ) async {
-    _security.require('PRODUCTION_EDIT');
+    _security.require('PRODUCTION_VIEW');
     final db = await _db;
+    await _requireOrderReadScope(db, orderId);
     final orderRows = await db.query(
       'production_orders',
       where: 'id = ?',
@@ -763,19 +827,21 @@ class ProductionLocalDataSource {
     if (orderRows.isEmpty) throw Exception('أمر الإنتاج غير موجود');
     final order = orderRows.single;
     _requireVerifiedUnitSnapshot(order);
+    final consumptionArgs = <Object?>[orderId];
+    final consumptionScope = _warehouseReadPredicate('c', consumptionArgs);
     final rows = await db.rawQuery(
       '''
       SELECT b.rawMaterialId, r.name AS rawMaterialName, r.code AS rawMaterialCode,
         b.unitId, u.name AS unitName, u.abbreviation AS unitAbbreviation,
         b.quantity * ? AS requiredQuantity,
-        COALESCE((SELECT SUM(c.quantity) FROM production_material_consumptions c WHERE c.productionOrderId = ? AND c.rawMaterialId = b.rawMaterialId), 0) AS consumedQuantity
+        COALESCE((SELECT SUM(c.quantity) FROM production_material_consumptions c WHERE c.productionOrderId = ? AND c.rawMaterialId = b.rawMaterialId AND $consumptionScope), 0) AS consumedQuantity
       FROM production_order_bom_items b
       JOIN raw_materials r ON r.id = b.rawMaterialId
       JOIN units u ON u.id = b.unitId
       WHERE b.productionOrderId = ?
       ORDER BY r.name ASC
     ''',
-      [orderRows.first['plannedBaseQuantity'], orderId, orderId],
+      [orderRows.first['plannedBaseQuantity'], ...consumptionArgs, orderId],
     );
     return rows
         .map(
@@ -1159,12 +1225,17 @@ class ProductionLocalDataSource {
       await _security.requireResourceScope(ScopeType.warehouse, warehouseId);
       final destination = await txn.query(
         'warehouses',
-        columns: ['factoryId'],
+        columns: ['factoryId', 'purpose'],
         where: 'id = ? AND state = ?',
         whereArgs: [warehouseId, 'active'],
         limit: 1,
       );
       if (destination.isEmpty) throw Exception('المخزن غير متاح');
+      if (destination.single['purpose'] != WarehousePurpose.sellable.value) {
+        throw Exception(
+          'Finished goods must be received into a sellable warehouse.',
+        );
+      }
       final stageContext = await txn.query(
         'production_stages',
         columns: ['factoryId'],
@@ -1252,8 +1323,12 @@ class ProductionLocalDataSource {
   }
 
   Future<List<ProductionMaterialRecord>> consumptions(String orderId) async {
-    final rows = await (await _db).rawQuery(
-      '''
+    _security.require('PRODUCTION_VIEW');
+    final db = await _db;
+    await _requireOrderReadScope(db, orderId);
+    final args = <Object?>[orderId];
+    final warehouseScope = _warehouseReadPredicate('c', args);
+    final rows = await db.rawQuery('''
       SELECT c.*, r.name AS rawMaterialName, r.code AS rawMaterialCode,
         w.name AS warehouseName, u.name AS unitName,
         u.abbreviation AS unitAbbreviation
@@ -1261,11 +1336,9 @@ class ProductionLocalDataSource {
       JOIN raw_materials r ON r.id = c.rawMaterialId
       JOIN warehouses w ON w.id = c.warehouseId
       JOIN units u ON u.id = c.unitId
-      WHERE c.productionOrderId = ?
+      WHERE c.productionOrderId = ? AND $warehouseScope
       ORDER BY c.consumptionDate ASC, c.createdAt ASC
-      ''',
-      [orderId],
-    );
+      ''', args);
     return rows
         .map(
           (row) => ProductionMaterialRecord(
@@ -1291,9 +1364,14 @@ class ProductionLocalDataSource {
   }
 
   Future<List<ProductionWasteRecord>> waste(String orderId) async {
-    final rows = await (await _db).rawQuery(
-      'SELECT w.*, r.name AS rawMaterialName FROM production_waste w JOIN raw_materials r ON r.id = w.rawMaterialId WHERE w.productionOrderId = ? ORDER BY w.wasteDate ASC',
-      [orderId],
+    _security.require('PRODUCTION_VIEW');
+    final db = await _db;
+    await _requireOrderReadScope(db, orderId);
+    final args = <Object?>[orderId];
+    final warehouseScope = _warehouseReadPredicate('w', args);
+    final rows = await db.rawQuery(
+      'SELECT w.*, r.name AS rawMaterialName FROM production_waste w JOIN raw_materials r ON r.id = w.rawMaterialId WHERE w.productionOrderId = ? AND $warehouseScope ORDER BY w.wasteDate ASC',
+      args,
     );
     return rows
         .map(
@@ -1313,8 +1391,12 @@ class ProductionLocalDataSource {
   }
 
   Future<List<ProductionOutputRecord>> outputs(String orderId) async {
-    final rows = await (await _db).rawQuery(
-      '''
+    _security.require('PRODUCTION_VIEW');
+    final db = await _db;
+    await _requireOrderReadScope(db, orderId);
+    final args = <Object?>[orderId];
+    final warehouseScope = _warehouseReadPredicate('o', args);
+    final rows = await db.rawQuery('''
       SELECT o.*, po.productId, po.variantId, p.name AS productName,
         p.code AS productCode, pv.name AS variantName,
         w.name AS warehouseName, u.name AS unitName,
@@ -1326,11 +1408,9 @@ class ProductionLocalDataSource {
       JOIN warehouses w ON w.id = o.warehouseId
       JOIN units u ON u.id = o.unitId
       LEFT JOIN production_batch_costs bc ON bc.productionOrderId = po.id
-      WHERE o.productionOrderId = ?
+      WHERE o.productionOrderId = ? AND $warehouseScope
       ORDER BY o.outputDate ASC, o.createdAt ASC
-      ''',
-      [orderId],
-    );
+      ''', args);
     return rows
         .map(
           (row) => ProductionOutputRecord(
@@ -1363,12 +1443,19 @@ class ProductionLocalDataSource {
       'SELECT rs.*, ps.name AS stageName FROM production_route_stages rs JOIN production_stages ps ON ps.id = rs.productionStageId WHERE rs.routeId = ? ORDER BY rs.sequence ASC',
       [row['id']],
     );
+    final session = _security.session!;
+    final allStagesVisible = stages.every(
+      (stage) => session.canAccess(
+        ScopeType.productionStage,
+        stage['productionStageId'] as String,
+      ),
+    );
     return ProductionRoute(
       id: row['id'] as String,
       productId: row['productId'] as String,
       createdAt: _date(row['createdAt']),
       updatedAt: _date(row['updatedAt']),
-      stages: stages
+      stages: (allStagesVisible ? stages : const <Map<String, Object?>>[])
           .map(
             (stage) => ProductionRouteStage(
               id: stage['id'] as String,
@@ -1382,7 +1469,11 @@ class ProductionLocalDataSource {
     );
   }
 
-  Future<ProductionOrder> _order(DatabaseExecutor db, String id) async {
+  Future<ProductionOrder> _order(
+    DatabaseExecutor db,
+    String id, {
+    bool applyReadScopes = false,
+  }) async {
     final rows = await db.rawQuery(
       'SELECT po.*, p.name AS productName FROM production_orders po JOIN products p ON p.id = po.productId WHERE po.id = ?',
       [id],
@@ -1393,6 +1484,15 @@ class ProductionLocalDataSource {
       'SELECT os.*, ps.name AS stageName FROM production_order_stages os JOIN production_stages ps ON ps.id = os.productionStageId WHERE os.productionOrderId = ? ORDER BY os.sequence ASC',
       [id],
     );
+    final session = _security.session!;
+    final visibleStages = applyReadScopes
+        ? stages.where(
+            (stage) => session.canAccess(
+              ScopeType.productionStage,
+              stage['productionStageId'] as String,
+            ),
+          )
+        : stages;
     return ProductionOrder(
       id: row['id'] as String,
       orderNumber: row['orderNumber'] as String,
@@ -1417,7 +1517,7 @@ class ProductionLocalDataSource {
       notes: row['notes'] as String?,
       createdAt: _date(row['createdAt']),
       updatedAt: _date(row['updatedAt']),
-      stages: stages
+      stages: visibleStages
           .map(
             (stage) => ProductionOrderStage(
               id: stage['id'] as String,
@@ -1437,6 +1537,72 @@ class ProductionLocalDataSource {
           )
           .toList(),
     );
+  }
+
+  Future<bool> _hasOrderReadScope(DatabaseExecutor db, String orderId) async {
+    final session = _security.session!;
+    if (session.isSystemAdmin) return true;
+
+    final stageIds = session.scopes
+        .where((scope) => scope.type == ScopeType.productionStage)
+        .map((scope) => scope.scopeId)
+        .toList();
+    if (stageIds.isNotEmpty) {
+      final rows = await db.query(
+        'production_order_stages',
+        columns: ['id'],
+        where:
+            'productionOrderId = ? AND productionStageId IN (${List.filled(stageIds.length, '?').join(',')})',
+        whereArgs: [orderId, ...stageIds],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) return true;
+    }
+
+    final warehouseIds = _warehouseScopeIds()!;
+    if (warehouseIds.isEmpty) return false;
+    for (final table in [
+      'production_material_consumptions',
+      'production_waste',
+      'production_outputs',
+    ]) {
+      final rows = await db.query(
+        table,
+        columns: ['id'],
+        where:
+            'productionOrderId = ? AND warehouseId IN (${List.filled(warehouseIds.length, '?').join(',')})',
+        whereArgs: [orderId, ...warehouseIds],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  Future<void> _requireOrderReadScope(
+    DatabaseExecutor db,
+    String orderId,
+  ) async {
+    if (!await _hasOrderReadScope(db, orderId)) {
+      throw Exception('النطاق المسموح لا يشمل هذا المورد');
+    }
+  }
+
+  Set<String>? _warehouseScopeIds() {
+    final session = _security.session!;
+    if (session.isSystemAdmin) return null;
+    return session.scopes
+        .where((scope) => scope.type == ScopeType.warehouse)
+        .map((scope) => scope.scopeId)
+        .toSet();
+  }
+
+  String _warehouseReadPredicate(String alias, List<Object?> args) {
+    final warehouseIds = _warehouseScopeIds();
+    if (warehouseIds == null) return '1 = 1';
+    if (warehouseIds.isEmpty) return '1 = 0';
+    args.addAll(warehouseIds);
+    return '$alias.warehouseId IN (${List.filled(warehouseIds.length, '?').join(',')})';
   }
 
   Future<void> _changeStatus(

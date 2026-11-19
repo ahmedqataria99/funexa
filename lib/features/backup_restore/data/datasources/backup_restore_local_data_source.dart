@@ -1,12 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:furnexa/core/constants/app_constants.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
+import 'package:furnexa/features/backup_restore/data/backup_payload_codec.dart';
 import 'package:furnexa/features/backup_restore/domain/entities/backup_restore_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
 
@@ -16,6 +15,7 @@ class BackupRestoreLocalDataSource {
 
   final SecurityLocalDataSource security;
   static const int _backupFormatVersion = 1;
+  static const BackupPayloadCodec _payloadCodec = BackupPayloadCodec();
 
   Future<Database> get _db async => FurnexaDatabase.instance.database;
 
@@ -62,12 +62,12 @@ class BackupRestoreLocalDataSource {
       'database': {'tables': tableRows},
     };
 
-    final canonical = jsonEncode(payload);
-    final checksum = sha256.convert(utf8.encode(canonical)).toString();
-    final fullPayload = <String, dynamic>{...payload, 'checksum': checksum};
+    final encoding = _payloadCodec.encode(payload);
+    final checksum = encoding.checksum;
+    final fullPayload = encoding.payload;
     final file = File(destination);
     await file.parent.create(recursive: true);
-    await file.writeAsString(jsonEncode(fullPayload));
+    await file.writeAsString(encoding.json);
 
     final metadata = BackupMetadata(
       backupId: backupId,
@@ -109,8 +109,10 @@ class BackupRestoreLocalDataSource {
       throw Exception('Invalid backup extension');
 
     final source = await file.readAsString();
-    final decoded = jsonDecode(source);
-    if (decoded is! Map<String, dynamic>) {
+    late final Map<String, dynamic> decoded;
+    try {
+      decoded = _payloadCodec.decode(source);
+    } on FormatException {
       throw Exception('Invalid backup file format');
     }
 
@@ -138,12 +140,7 @@ class BackupRestoreLocalDataSource {
     if (recordCount < 0) throw Exception('Invalid record count in backup');
     if (checksum.isEmpty) throw Exception('Missing backup checksum');
 
-    final sanitized = Map<String, dynamic>.from(decoded);
-    sanitized.remove('checksum');
-    final computed = sha256
-        .convert(utf8.encode(jsonEncode(sanitized)))
-        .toString();
-    if (computed != checksum)
+    if (!_payloadCodec.verifyChecksum(decoded))
       throw Exception('Backup checksum validation failed');
 
     final currentVersion = await FurnexaDatabase.instance.getDatabaseVersion();
@@ -198,8 +195,7 @@ class BackupRestoreLocalDataSource {
     );
 
     try {
-      final backupJson =
-          jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
+      final backupJson = _payloadCodec.decode(await File(path).readAsString());
       final database = backupJson['database'];
       if (database is! Map || database['tables'] is! List) {
         throw Exception('Backup payload is missing database tables');

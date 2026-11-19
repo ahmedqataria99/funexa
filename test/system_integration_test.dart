@@ -213,6 +213,10 @@ void main() {
       'warehouseId': warehouseId,
       'itemId': productId,
       'itemType': 'PRODUCT',
+      'productId': productId,
+      'variantId': null,
+      'inventoryIdentityKind': 'BASE',
+      'unitId': unitId,
       'quantity': 10,
       'createdAt': stamp,
       'updatedAt': stamp,
@@ -411,7 +415,7 @@ void main() {
       ],
     );
     await sales.saveOrder(order);
-    await sales.postDelivery(
+    final delivery = await sales.postDelivery(
       order: order,
       operationId: 'sales-integration-$suffix',
       warehouseId: warehouseId,
@@ -426,6 +430,27 @@ void main() {
         ),
       ],
     );
+    expect(
+      (await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [warehouseId, productId],
+        limit: 1,
+      )).single['quantity'],
+      10,
+    );
+    await sales.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.dispatched,
+    );
+    await sales.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.inTransit,
+    );
+    await sales.updateDeliveryDispatch(
+      deliveryId: delivery.id,
+      status: DeliveryDispatchStatus.delivered,
+    );
 
     final rows = await db.query(
       'stock_balances',
@@ -434,7 +459,14 @@ void main() {
       limit: 1,
     );
     expect((rows.single['quantity'] as num).toDouble(), 7);
-    expect(await accounting.customerLedger(customerId), isNotEmpty);
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_DELIVERY', delivery.id],
+      ),
+      hasLength(1),
+    );
   });
 
   test(

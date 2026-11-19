@@ -598,6 +598,272 @@ class WarehousesStockLocalDataSource {
     );
   }
 
+  Future<void> transferQuarantinedSalesReturnWithinTransaction({
+    required DatabaseExecutor executor,
+    required String sourceWarehouseId,
+    required String destinationWarehouseId,
+    required StockItemOption item,
+    required double quantity,
+    required DateTime date,
+    required String reference,
+  }) async {
+    _security.require('RETURNS_EDIT');
+    _positive(quantity);
+    if (sourceWarehouseId == destinationWarehouseId) {
+      throw Exception('لا يمكن التحويل إلى نفس المخزن');
+    }
+    await _validateWarehouse(executor, sourceWarehouseId);
+    await _validateWarehouse(executor, destinationWarehouseId);
+    await _requireWarehousePurpose(
+      executor,
+      sourceWarehouseId,
+      WarehousePurpose.quarantine,
+    );
+    await _requireWarehousePurpose(
+      executor,
+      destinationWarehouseId,
+      WarehousePurpose.sellable,
+    );
+    await _validateItem(executor, item);
+    final sourceQuantity = await _getBalance(executor, sourceWarehouseId, item);
+    if (sourceQuantity < quantity) {
+      throw Exception('الكمية المقبولة في الحجر غير كافية');
+    }
+    final valuation = await _accounting.valuationWithinTransaction(
+      executor,
+      sourceWarehouseId,
+      item.inventoryId,
+      item.type.value,
+    );
+    if (valuation == null || valuation.quantity < quantity) {
+      throw Exception('تقييم الكمية المقبولة غير كاف');
+    }
+
+    await _writeBalance(
+      executor,
+      sourceWarehouseId,
+      item,
+      sourceQuantity - quantity,
+    );
+    await _writeBalance(
+      executor,
+      destinationWarehouseId,
+      item,
+      await _getBalance(executor, destinationWarehouseId, item) + quantity,
+    );
+    await _writeTransaction(
+      executor,
+      sourceWarehouseId,
+      item,
+      StockTransactionType.transferOut,
+      quantity,
+      date,
+      reference,
+      'Sales return accepted',
+    );
+    await _writeTransaction(
+      executor,
+      destinationWarehouseId,
+      item,
+      StockTransactionType.transferIn,
+      quantity,
+      date,
+      reference,
+      'Sales return accepted',
+    );
+    await _accounting.transferQuarantineInventoryValueWithinTransaction(
+      executor: executor,
+      sourceWarehouseId: sourceWarehouseId,
+      destinationWarehouseId: destinationWarehouseId,
+      itemId: item.inventoryId,
+      itemType: item.type.value,
+      quantity: quantity,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
+      unitId: item.unitId,
+    );
+    final value = quantity * valuation.averageCost;
+    if (value > 0) {
+      await _accounting.postInventoryTransferWithinTransaction(
+        executor: executor,
+        referenceId: reference,
+        date: date,
+        value: value,
+      );
+    }
+  }
+
+  Future<void> transferPurchaseReturnToQuarantineWithinTransaction({
+    required DatabaseExecutor executor,
+    required String sourceWarehouseId,
+    required String quarantineWarehouseId,
+    required StockItemOption item,
+    required double quantity,
+    required DateTime date,
+    required String reference,
+  }) async {
+    _security.require('RETURNS_EDIT');
+    await _security.requireResourceScope(
+      ScopeType.warehouse,
+      sourceWarehouseId,
+    );
+    await _security.requireResourceScope(
+      ScopeType.warehouse,
+      quarantineWarehouseId,
+    );
+    _positive(quantity);
+    if (sourceWarehouseId == quarantineWarehouseId) {
+      throw Exception('لا يمكن التحويل إلى نفس المخزن');
+    }
+    await _validateWarehouse(executor, sourceWarehouseId);
+    await _validateWarehouse(executor, quarantineWarehouseId);
+    await _requireSellableWarehouse(executor, sourceWarehouseId);
+    await _requireWarehousePurpose(
+      executor,
+      quarantineWarehouseId,
+      WarehousePurpose.quarantine,
+    );
+    await _validateItem(executor, item);
+    final sourceQuantity = await _getBalance(executor, sourceWarehouseId, item);
+    if (sourceQuantity < quantity) {
+      throw Exception('الكمية المتاحة في المخزن غير كافية');
+    }
+    final valuation = await _accounting.valuationWithinTransaction(
+      executor,
+      sourceWarehouseId,
+      item.inventoryId,
+      item.type.value,
+    );
+    if (valuation == null || valuation.quantity < quantity) {
+      throw Exception('تقييم المخزون غير متاح أو غير كاف');
+    }
+    await _writeBalance(
+      executor,
+      sourceWarehouseId,
+      item,
+      sourceQuantity - quantity,
+    );
+    await _writeBalance(
+      executor,
+      quarantineWarehouseId,
+      item,
+      await _getBalance(executor, quarantineWarehouseId, item) + quantity,
+    );
+    await _writeTransaction(
+      executor,
+      sourceWarehouseId,
+      item,
+      StockTransactionType.transferOut,
+      quantity,
+      date,
+      reference,
+      'Purchase return physical receipt',
+    );
+    await _writeTransaction(
+      executor,
+      quarantineWarehouseId,
+      item,
+      StockTransactionType.transferIn,
+      quantity,
+      date,
+      reference,
+      'Purchase return physical receipt',
+    );
+    await _accounting.consumeInventoryValueWithinTransaction(
+      executor: executor,
+      warehouseId: sourceWarehouseId,
+      itemId: item.inventoryId,
+      itemType: item.type.value,
+      quantity: quantity,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
+      unitId: item.unitId,
+    );
+    await _accounting.receiveInventoryValueWithinTransaction(
+      executor: executor,
+      warehouseId: quarantineWarehouseId,
+      itemId: item.inventoryId,
+      itemType: item.type.value,
+      quantity: quantity,
+      unitCost: valuation.averageCost,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
+      unitId: item.unitId,
+    );
+    await _accounting.postInventoryTransferWithinTransaction(
+      executor: executor,
+      referenceId: reference,
+      date: date,
+      value: quantity * valuation.averageCost,
+    );
+  }
+
+  Future<void> applyPurchaseReturnHandoverWithinTransaction({
+    required DatabaseExecutor executor,
+    required String quarantineWarehouseId,
+    required StockItemOption item,
+    required double quantity,
+    required DateTime date,
+    required String reference,
+  }) async {
+    _security.require('RETURNS_EDIT');
+    await _security.requireResourceScope(
+      ScopeType.warehouse,
+      quarantineWarehouseId,
+    );
+    _positive(quantity);
+    await _validateWarehouse(executor, quarantineWarehouseId);
+    await _requireWarehousePurpose(
+      executor,
+      quarantineWarehouseId,
+      WarehousePurpose.quarantine,
+    );
+    await _validateItem(executor, item);
+    final current = await _getBalance(executor, quarantineWarehouseId, item);
+    if (current < quantity) {
+      throw Exception('الكمية المقبولة في الحجر غير كافية');
+    }
+    final valuation = await _accounting.valuationWithinTransaction(
+      executor,
+      quarantineWarehouseId,
+      item.inventoryId,
+      item.type.value,
+    );
+    if (valuation == null || valuation.quantity < quantity) {
+      throw Exception('تقييم مخزون الحجر غير متاح أو غير كاف');
+    }
+    await _writeBalance(
+      executor,
+      quarantineWarehouseId,
+      item,
+      current - quantity,
+    );
+    await _writeTransaction(
+      executor,
+      quarantineWarehouseId,
+      item,
+      StockTransactionType.stockOut,
+      quantity,
+      date,
+      reference,
+      'Purchase return handed over to supplier',
+    );
+    await _accounting.consumePurchaseReturnQuarantineValueWithinTransaction(
+      executor: executor,
+      warehouseId: quarantineWarehouseId,
+      itemId: item.inventoryId,
+      itemType: item.type.value,
+      quantity: quantity,
+      productId: item.baseProductId,
+      variantId: item.variantId,
+      identityKind: item.identityKind,
+      unitId: item.unitId,
+    );
+  }
+
   Future<void> adjust({
     required String warehouseId,
     required StockItemOption item,
@@ -777,6 +1043,25 @@ class WarehousesStockLocalDataSource {
       limit: 1,
     );
     if (rows.isEmpty) throw Exception('المخزن غير موجود أو غير نشط');
+  }
+
+  Future<void> _requireWarehousePurpose(
+    DatabaseExecutor db,
+    String id,
+    WarehousePurpose expected,
+  ) async {
+    final rows = await db.query(
+      'warehouses',
+      columns: ['purpose'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) throw Exception('المخزن غير موجود');
+    final purpose = WarehousePurpose.fromStorage(rows.single['purpose']);
+    if (purpose != expected) {
+      throw Exception('نوع غرض المخزن غير صالح لهذه الحركة');
+    }
   }
 
   Future<void> _requireSellableWarehouse(DatabaseExecutor db, String id) async {

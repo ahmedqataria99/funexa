@@ -26,6 +26,39 @@ enum DeliveryDispatchStatus {
   cancelled,
 }
 
+enum SalesDeliveryFailure {
+  warehouseUnavailable,
+  insufficientAvailableStock,
+  stockUnitMismatch,
+  reservationMissing,
+  physicalStockInsufficient,
+  cancellationAfterDispatch,
+  invalidTransition,
+}
+
+class SalesDeliveryException implements Exception {
+  const SalesDeliveryException(this.failure);
+
+  final SalesDeliveryFailure failure;
+}
+
+class DeliveryStockAvailability {
+  const DeliveryStockAvailability({
+    required this.physicalBaseQuantity,
+    required this.reservedBaseQuantity,
+    required this.orderReservedBaseQuantity,
+  });
+
+  final double physicalBaseQuantity;
+  final double reservedBaseQuantity;
+  final double orderReservedBaseQuantity;
+
+  double get availableBaseQuantity =>
+      physicalBaseQuantity > reservedBaseQuantity
+      ? physicalBaseQuantity - reservedBaseQuantity
+      : 0;
+}
+
 extension SalesItemTypeValue on SalesItemType {
   String get value =>
       this == SalesItemType.product ? 'PRODUCT' : 'RAW_MATERIAL';
@@ -100,13 +133,20 @@ class SalesItem {
     this.tax = 0,
     this.lineTotal = 0,
     this.deliveredQuantity = 0,
+    this.invoicedQuantity = 0,
     this.notes,
   });
   final String id, itemId, unitId;
   final String? variantId, baseUnitId;
   final String inventoryIdentityKind, identitySnapshotStatus;
   final SalesItemType itemType;
-  final double quantity, unitPrice, discount, tax, lineTotal, deliveredQuantity;
+  final double quantity,
+      unitPrice,
+      discount,
+      tax,
+      lineTotal,
+      deliveredQuantity,
+      invoicedQuantity;
   final double unitConversionFactor;
   final double? baseQuantity;
   final double deliveredBaseQuantity;
@@ -114,6 +154,49 @@ class SalesItem {
   double get normalizedBaseQuantity =>
       baseQuantity ?? quantity * unitConversionFactor;
   double get remainingQuantity => quantity - deliveredQuantity;
+  double get remainingInvoiceQuantity => quantity - invoicedQuantity;
+}
+
+class SalesInvoiceLineRequest {
+  const SalesInvoiceLineRequest({
+    required this.salesOrderItemId,
+    required this.quantity,
+  });
+
+  final String salesOrderItemId;
+  final double quantity;
+}
+
+class SalesInvoice {
+  const SalesInvoice({
+    required this.id,
+    required this.invoiceNumber,
+    required this.salesOrderId,
+    required this.customerId,
+    required this.invoiceDate,
+    required this.subtotal,
+    required this.discount,
+    required this.tax,
+    required this.grandTotal,
+    required this.operationId,
+  });
+
+  final String id, invoiceNumber, salesOrderId, customerId, operationId;
+  final DateTime invoiceDate;
+  final double subtotal, discount, tax, grandTotal;
+
+  factory SalesInvoice.fromMap(Map<String, Object?> row) => SalesInvoice(
+    id: row['id'] as String,
+    invoiceNumber: row['invoiceNumber'] as String,
+    salesOrderId: row['salesOrderId'] as String,
+    customerId: row['customerId'] as String,
+    invoiceDate: _date(row['invoiceDate']),
+    subtotal: (row['subtotal'] as num).toDouble(),
+    discount: (row['discount'] as num).toDouble(),
+    tax: (row['tax'] as num).toDouble(),
+    grandTotal: (row['grandTotal'] as num).toDouble(),
+    operationId: row['operationId'] as String,
+  );
 }
 
 class Quotation {

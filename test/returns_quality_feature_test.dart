@@ -15,6 +15,7 @@ void main() {
   late String secondVariantId;
   late String rawMaterialId;
   late String warehouseId;
+  late String quarantineWarehouseId;
   late String unitId;
   late String purchaseUnitId;
   late String customerId;
@@ -39,6 +40,7 @@ void main() {
     variantId = 'returns-variant-$suffix';
     secondVariantId = 'returns-second-variant-$suffix';
     rawMaterialId = 'returns-material-$suffix';
+    quarantineWarehouseId = 'returns-quarantine-$suffix';
     customerId = 'returns-customer-$suffix';
     supplierId = 'returns-supplier-$suffix';
     final timestamp = now.millisecondsSinceEpoch;
@@ -55,6 +57,16 @@ void main() {
       'factoryId': factoryId,
       'name': 'مخزن المرتجعات $suffix',
       'code': 'RW-$suffix',
+      'state': 'active',
+      'createdAt': timestamp,
+      'updatedAt': timestamp,
+    });
+    await db.insert('warehouses', {
+      'id': quarantineWarehouseId,
+      'factoryId': factoryId,
+      'name': 'مخزن حجر المرتجعات $suffix',
+      'code': 'RQ-$suffix',
+      'purpose': 'QUARANTINE',
       'state': 'active',
       'createdAt': timestamp,
       'updatedAt': timestamp,
@@ -390,6 +402,273 @@ void main() {
     return receiptId;
   }
 
+  Future<void> receiveSalesReturnItems({
+    required String returnId,
+    required String receiptKey,
+    required List<SalesReturnReceiptItem> items,
+  }) => dataSource.receiveSalesReturn(
+    returnId: returnId,
+    receiptId: 'sales-return-receipt-$receiptKey',
+    receiptNumber: 'SRR-$receiptKey',
+    quarantineWarehouseId: quarantineWarehouseId,
+    receiptDate: now,
+    items: items,
+  );
+
+  Future<void> inspectSalesReturn({
+    required String returnId,
+    required String inspectionKey,
+    required String itemId,
+    required String itemType,
+    required List<QualityInspectionItem> items,
+    QualityInspectionStatus status = QualityInspectionStatus.completed,
+  }) => dataSource.createQualityInspection(
+    id: 'qi-$inspectionKey',
+    inspectionNumber: 'QI-$inspectionKey',
+    sourceType: 'SALES_RETURN',
+    sourceId: returnId,
+    warehouseId: quarantineWarehouseId,
+    itemId: itemId,
+    itemType: itemType,
+    inspectionDate: now,
+    status: status,
+    items: items,
+  );
+
+  test('sales returns reject direct APPROVED and COMPLETED creation', () async {
+    for (final status in [ReturnStatus.approved, ReturnStatus.completed]) {
+      await expectLater(
+        dataSource.createSalesReturn(
+          id: 'sr-direct-${status.value}-$suffix',
+          returnNumber: 'SR-DIRECT-${status.value}-$suffix',
+          salesOrderId: 'sales-order-$suffix',
+          customerId: customerId,
+          warehouseId: warehouseId,
+          returnDate: now,
+          status: status,
+          items: const [],
+        ),
+        throwsA(
+          predicate(
+            (error) => error.toString().contains('created with PENDING status'),
+          ),
+        ),
+      );
+    }
+    expect(
+      await (await FurnexaDatabase.instance.database).query('sales_returns'),
+      isEmpty,
+    );
+    expect(
+      await (await FurnexaDatabase.instance.database).query('journal_entries'),
+      isEmpty,
+    );
+  });
+
+  test(
+    'sales return rejection and cancellation are blocked only after physical receipt',
+    () async {
+      Future<SalesReturn> createReturn(String key) async {
+        final deliveryItemId = await seedDeliveredSalesLine(
+          id: 'status-guard-$key-$suffix',
+          sourceProductId: productId,
+          salesUnitId: unitId,
+          quantity: 2,
+          deliveredQuantity: 2,
+          factor: 1,
+          unitRevenue: 5,
+          unitCogs: 2,
+        );
+        final returnId = 'sr-status-guard-$key-$suffix';
+        return dataSource.createSalesReturn(
+          id: returnId,
+          returnNumber: 'SR-STATUS-GUARD-$key-$suffix',
+          salesOrderId: 'sales-order-$suffix',
+          customerId: customerId,
+          warehouseId: warehouseId,
+          returnDate: now,
+          salesDeliveryId: 'sales-delivery-status-guard-$key-$suffix',
+          items: [
+            SalesReturnItem(
+              id: '$returnId-item',
+              itemId: productId,
+              itemType: 'PRODUCT',
+              quantity: 2,
+              unitId: unitId,
+              baseUnitId: unitId,
+              unitConversionFactor: 1,
+              baseQuantity: 2,
+              inventoryIdentityKind: 'BASE',
+              identitySnapshotStatus: 'VERIFIED',
+              sourceDeliveryItemId: deliveryItemId,
+            ),
+          ],
+        );
+      }
+
+      final rejectedWithoutReceipt = await createReturn('reject-no-receipt');
+      await expectLater(
+        dataSource.updateSalesReturnStatus(
+          rejectedWithoutReceipt.id,
+          ReturnStatus.approved,
+        ),
+        throwsException,
+      );
+      await dataSource.updateSalesReturnStatus(
+        rejectedWithoutReceipt.id,
+        ReturnStatus.rejected,
+      );
+      final cancelledWithoutReceipt = await createReturn('cancel-no-receipt');
+      await dataSource.updateSalesReturnStatus(
+        cancelledWithoutReceipt.id,
+        ReturnStatus.cancelled,
+      );
+
+      Future<SalesReturn> createReceivedReturn(String key) async {
+        final value = await createReturn(key);
+        await receiveSalesReturnItems(
+          returnId: value.id,
+          receiptKey: 'status-guard-$key-$suffix',
+          items: [
+            SalesReturnReceiptItem(
+              salesReturnItemId: value.items.single.id,
+              quantity: 2,
+            ),
+          ],
+        );
+        return value;
+      }
+
+      final receivedForRejection = await createReceivedReturn(
+        'reject-received',
+      );
+      await expectLater(
+        dataSource.updateSalesReturnStatus(
+          receivedForRejection.id,
+          ReturnStatus.rejected,
+        ),
+        throwsException,
+      );
+      final receivedForCancellation = await createReceivedReturn(
+        'cancel-received',
+      );
+      await expectLater(
+        dataSource.updateSalesReturnStatus(
+          receivedForCancellation.id,
+          ReturnStatus.cancelled,
+        ),
+        throwsException,
+      );
+
+      final receivedForApproval = await createReceivedReturn('approve-qc-gate');
+      await expectLater(
+        dataSource.updateSalesReturnStatus(
+          receivedForApproval.id,
+          ReturnStatus.approved,
+        ),
+        throwsException,
+      );
+
+      final db = await FurnexaDatabase.instance.database;
+      for (final expected in [
+        (rejectedWithoutReceipt.id, ReturnStatus.rejected.value),
+        (cancelledWithoutReceipt.id, ReturnStatus.cancelled.value),
+        (receivedForRejection.id, ReturnStatus.pending.value),
+        (receivedForCancellation.id, ReturnStatus.pending.value),
+        (receivedForApproval.id, ReturnStatus.pending.value),
+      ]) {
+        final rows = await db.query(
+          'sales_returns',
+          columns: ['status'],
+          where: 'id = ?',
+          whereArgs: [expected.$1],
+          limit: 1,
+        );
+        expect(rows.single['status'], expected.$2);
+      }
+    },
+  );
+
+  test(
+    'physical sales return receipt is idempotent and quarantine-only',
+    () async {
+      final deliveryItemId = await seedDeliveredSalesLine(
+        id: 'receipt-idempotent-$suffix',
+        sourceProductId: productId,
+        salesUnitId: unitId,
+        quantity: 2,
+        deliveredQuantity: 2,
+        factor: 1,
+        unitRevenue: 5,
+        unitCogs: 2,
+      );
+      await dataSource.createSalesReturn(
+        id: 'sr-receipt-idempotent-$suffix',
+        returnNumber: 'SR-RECEIPT-IDEMPOTENT-$suffix',
+        salesOrderId: 'sales-order-$suffix',
+        customerId: customerId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        salesDeliveryId: 'sales-delivery-receipt-idempotent-$suffix',
+        items: [
+          SalesReturnItem(
+            id: 'sr-receipt-idempotent-item-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            quantity: 2,
+            unitId: unitId,
+            baseUnitId: unitId,
+            baseQuantity: 2,
+            identitySnapshotStatus: 'VERIFIED',
+            sourceDeliveryItemId: deliveryItemId,
+          ),
+        ],
+      );
+      final receiptItems = [
+        SalesReturnReceiptItem(
+          salesReturnItemId: 'sr-receipt-idempotent-item-$suffix',
+          quantity: 2,
+        ),
+      ];
+      await receiveSalesReturnItems(
+        returnId: 'sr-receipt-idempotent-$suffix',
+        receiptKey: 'idempotent-$suffix',
+        items: receiptItems,
+      );
+      await receiveSalesReturnItems(
+        returnId: 'sr-receipt-idempotent-$suffix',
+        receiptKey: 'idempotent-$suffix',
+        items: receiptItems,
+      );
+      final db = await FurnexaDatabase.instance.database;
+      expect(
+        (await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        2,
+      );
+      expect(
+        await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [warehouseId, productId],
+        ),
+        hasLength(1),
+      );
+      expect(
+        await db.query(
+          'stock_transactions',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        ),
+        hasLength(1),
+      );
+      expect(await db.query('journal_entries'), isEmpty);
+    },
+  );
+
   test(
     'approved sales return increases warehouse stock and stores return record',
     () async {
@@ -452,7 +731,7 @@ void main() {
           warehouseId: warehouseId,
           returnDate: now,
           salesDeliveryId: salesDeliveryId,
-          status: ReturnStatus.approved,
+          status: ReturnStatus.pending,
           createdAt: now,
           updatedAt: now,
           items: [
@@ -469,6 +748,41 @@ void main() {
           ],
         ),
       );
+
+      await receiveSalesReturnItems(
+        returnId: saved.id,
+        receiptKey: 'approved-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: 'sr-item-$suffix',
+            quantity: 10,
+          ),
+        ],
+      );
+      await inspectSalesReturn(
+        returnId: saved.id,
+        inspectionKey: 'approved-$suffix',
+        itemId: productId,
+        itemType: 'PRODUCT',
+        items: [
+          QualityInspectionItem(
+            id: 'qi-item-approved-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            requestedQuantity: 10,
+            inspectedQuantity: 10,
+            acceptedQuantity: 10,
+            rejectedQuantity: 0,
+            sourceReturnItemId: 'sr-item-$suffix',
+            productId: productId,
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+          ),
+        ],
+      );
+      await dataSource.updateSalesReturnStatus(saved.id, ReturnStatus.approved);
 
       expect(saved.items.single.qualityStatus, ReturnQualityStatus.approved);
       final rows = await db.query(
@@ -522,7 +836,7 @@ void main() {
           warehouseId: warehouseId,
           returnDate: now,
           salesDeliveryId: salesDeliveryId,
-          status: ReturnStatus.approved,
+          status: ReturnStatus.pending,
           items: [
             SalesReturnItem(
               id: 'sr-over-item-$suffix',
@@ -549,22 +863,21 @@ void main() {
   );
 
   test(
-    'approved purchase return reduces warehouse stock and records supplier return',
+    'Purchase Return creation and approval do not post supplier handover',
     () async {
-      await dataSource.savePurchaseReturn(
-        PurchaseReturn(
-          id: 'pr-$suffix',
-          returnNumber: 'PR-$suffix',
+      final db = await FurnexaDatabase.instance.database;
+      await expectLater(
+        dataSource.createPurchaseReturn(
+          id: 'pr-direct-approved-$suffix',
+          returnNumber: 'PR-DIRECT-APPROVED-$suffix',
           purchaseOrderId: 'purchase-order-$suffix',
           supplierId: supplierId,
           warehouseId: warehouseId,
           returnDate: now,
           status: ReturnStatus.approved,
-          createdAt: now,
-          updatedAt: now,
           items: [
             PurchaseReturnItem(
-              id: 'pr-item-$suffix',
+              id: 'pr-direct-approved-item-$suffix',
               itemId: rawMaterialId,
               itemType: 'RAW_MATERIAL',
               quantity: 5,
@@ -574,50 +887,327 @@ void main() {
             ),
           ],
         ),
+        throwsException,
       );
-
-      final rows = await (await FurnexaDatabase.instance.database).query(
+      expect(await db.query('purchase_returns'), isEmpty);
+      final value = await dataSource.createPurchaseReturn(
+        id: 'pr-pending-$suffix',
+        returnNumber: 'PR-PENDING-$suffix',
+        purchaseOrderId: 'purchase-order-$suffix',
+        supplierId: supplierId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        items: [
+          PurchaseReturnItem(
+            id: 'pr-pending-item-$suffix',
+            itemId: rawMaterialId,
+            itemType: 'RAW_MATERIAL',
+            quantity: 5,
+            unitId: unitId,
+            unitPrice: 8,
+            qualityStatus: ReturnQualityStatus.approved,
+          ),
+        ],
+      );
+      final rows = await db.query(
         'purchase_returns',
         where: 'supplierId = ?',
         whereArgs: [supplierId],
       );
       expect(rows, hasLength(1));
       expect((await dataSource.purchaseReturns()).length, 1);
-      final stockRows = await (await FurnexaDatabase.instance.database).query(
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(value.id, ReturnStatus.approved),
+        throwsException,
+      );
+      final stockRows = await db.query(
         'stock_balances',
         where: 'warehouseId = ? AND itemId = ?',
         whereArgs: [warehouseId, rawMaterialId],
         limit: 1,
       );
-      expect((stockRows.single['quantity'] as num).toDouble(), 15);
-      final valuationRows = await (await FurnexaDatabase.instance.database)
-          .query(
-            'inventory_valuations',
-            where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
-            whereArgs: [warehouseId, rawMaterialId, 'RAW_MATERIAL'],
-            limit: 1,
-          );
-      expect((valuationRows.single['quantity'] as num).toDouble(), 15);
-      expect((valuationRows.single['averageCost'] as num).toDouble(), 8);
-      final db = await FurnexaDatabase.instance.database;
-      final journal = await db.query(
-        'journal_entries',
-        where: 'referenceType = ? AND referenceId = ?',
-        whereArgs: ['PURCHASE_RETURN', 'pr-$suffix'],
+      expect((stockRows.single['quantity'] as num).toDouble(), 20);
+      final valuationRows = await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, rawMaterialId, 'RAW_MATERIAL'],
         limit: 1,
       );
-      expect(journal, hasLength(1));
-      final apLines = await db.query(
-        'journal_lines',
-        where: 'journalEntryId = ?',
-        whereArgs: [journal.single['id']],
+      expect((valuationRows.single['quantity'] as num).toDouble(), 20);
+      expect((valuationRows.single['averageCost'] as num).toDouble(), 8);
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ? AND referenceId = ?',
+          whereArgs: ['PURCHASE_RETURN_HANDOVER', value.id],
+        ),
+        isEmpty,
       );
       expect(
-        apLines.fold<double>(
-          0,
-          (sum, line) => sum + (line['debit'] as num).toDouble(),
+        await db.query(
+          'stock_transactions',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [warehouseId, rawMaterialId],
         ),
-        40,
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'Purchase Return approval has no posting; accepted stock posts only once per handover',
+    () async {
+      final db = await FurnexaDatabase.instance.database;
+      final returnItemId = 'pr-lifecycle-item-$suffix';
+      final returnId = 'pr-lifecycle-$suffix';
+      final value = await dataSource.createPurchaseReturn(
+        id: returnId,
+        returnNumber: 'PR-LIFECYCLE-$suffix',
+        purchaseOrderId: 'purchase-order-$suffix',
+        supplierId: supplierId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        items: [
+          PurchaseReturnItem(
+            id: returnItemId,
+            itemId: rawMaterialId,
+            itemType: 'RAW_MATERIAL',
+            quantity: 5,
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+            baseQuantity: 5,
+            unitPrice: 8,
+            inventoryIdentityKind: 'BASE',
+            identitySnapshotStatus: 'VERIFIED',
+          ),
+        ],
+      );
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(value.id, ReturnStatus.approved),
+        throwsException,
+      );
+      final returnReceiptId = 'pr-physical-$suffix';
+      await dataSource.receivePurchaseReturn(
+        returnId: returnId,
+        receiptId: returnReceiptId,
+        receiptNumber: 'PRR-$suffix',
+        quarantineWarehouseId: quarantineWarehouseId,
+        receiptDate: now,
+        items: [
+          PurchaseReturnReceiptItem(
+            purchaseReturnItemId: returnItemId,
+            quantity: 5,
+          ),
+        ],
+      );
+      await expectLater(
+        dataSource.receivePurchaseReturn(
+          returnId: returnId,
+          receiptId: 'pr-physical-over-$suffix',
+          receiptNumber: 'PRR-OVER-$suffix',
+          quarantineWarehouseId: quarantineWarehouseId,
+          receiptDate: now,
+          items: [
+            PurchaseReturnReceiptItem(
+              purchaseReturnItemId: returnItemId,
+              quantity: 1,
+            ),
+          ],
+        ),
+        throwsException,
+      );
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(returnId, ReturnStatus.approved),
+        throwsException,
+      );
+      final receiptItemId = '$returnReceiptId:$returnItemId';
+      Future<void> inspectBatch(
+        String key,
+        double quantity,
+        double accepted,
+        double quarantined,
+      ) => dataSource.createQualityInspection(
+        id: 'pr-lifecycle-qi-$key-$suffix',
+        inspectionNumber: 'PRQI-$key-$suffix',
+        sourceType: 'PURCHASE_RETURN',
+        sourceId: returnId,
+        purchaseReturnReceiptId: returnReceiptId,
+        warehouseId: quarantineWarehouseId,
+        itemId: rawMaterialId,
+        itemType: 'RAW_MATERIAL',
+        inspectedBy: SecurityLocalDataSource().session!.user.id,
+        inspectionDate: now,
+        status: QualityInspectionStatus.completed,
+        items: [
+          QualityInspectionItem(
+            id: 'pr-lifecycle-qii-$key-$suffix',
+            itemId: rawMaterialId,
+            itemType: 'RAW_MATERIAL',
+            sourceReturnItemId: returnItemId,
+            purchaseReturnReceiptItemId: receiptItemId,
+            productId: rawMaterialId,
+            inventoryIdentityKind: 'BASE',
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+            requestedQuantity: quantity,
+            inspectedQuantity: quantity,
+            acceptedQuantity: accepted,
+            rejectedQuantity: 0,
+            quarantinedQuantity: quarantined,
+          ),
+        ],
+      );
+      await inspectBatch('first', 5, 2, 0);
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(returnId, ReturnStatus.approved),
+        throwsException,
+      );
+      await inspectBatch('second', 3, 2, 1);
+      final sourceBalanceBeforeApproval = (await db.query(
+        'stock_balances',
+        columns: ['quantity'],
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [warehouseId, rawMaterialId],
+      )).single['quantity'];
+      final quarantineBalanceBeforeApproval = (await db.query(
+        'stock_balances',
+        columns: ['quantity'],
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [quarantineWarehouseId, rawMaterialId],
+      )).single['quantity'];
+      await dataSource.updatePurchaseReturnStatus(
+        returnId,
+        ReturnStatus.approved,
+      );
+      expect(
+        (await db.query(
+          'stock_balances',
+          columns: ['quantity'],
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [warehouseId, rawMaterialId],
+        )).single['quantity'],
+        sourceBalanceBeforeApproval,
+      );
+      expect(
+        (await db.query(
+          'stock_balances',
+          columns: ['quantity'],
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, rawMaterialId],
+        )).single['quantity'],
+        quarantineBalanceBeforeApproval,
+      );
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ? AND referenceId = ?',
+          whereArgs: ['PURCHASE_RETURN_HANDOVER', returnId],
+        ),
+        isEmpty,
+      );
+      final firstHandover = [
+        PurchaseReturnHandoverItem(
+          purchaseReturnItemId: returnItemId,
+          purchaseReturnReceiptItemId: receiptItemId,
+          quantity: 2,
+        ),
+      ];
+      await dataSource.recordPurchaseReturnHandover(
+        handoverId: 'pr-ho-first-$suffix',
+        handoverNumber: 'PRH-FIRST-$suffix',
+        returnId: returnId,
+        supplierId: supplierId,
+        quarantineWarehouseId: quarantineWarehouseId,
+        handoverDate: now,
+        items: firstHandover,
+      );
+      await expectLater(
+        dataSource.recordPurchaseReturnHandover(
+          handoverId: 'pr-ho-over-$suffix',
+          handoverNumber: 'PRH-OVER-$suffix',
+          returnId: returnId,
+          supplierId: supplierId,
+          quarantineWarehouseId: quarantineWarehouseId,
+          handoverDate: now,
+          items: [
+            PurchaseReturnHandoverItem(
+              purchaseReturnItemId: returnItemId,
+              purchaseReturnReceiptItemId: receiptItemId,
+              quantity: 3,
+            ),
+          ],
+        ),
+        throwsException,
+      );
+      await dataSource.recordPurchaseReturnHandover(
+        handoverId: 'pr-ho-first-$suffix',
+        handoverNumber: 'PRH-FIRST-$suffix',
+        returnId: returnId,
+        supplierId: supplierId,
+        quarantineWarehouseId: quarantineWarehouseId,
+        handoverDate: now,
+        items: firstHandover,
+      );
+      expect(
+        (await db.query(
+          'stock_balances',
+          columns: ['quantity'],
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, rawMaterialId],
+        )).single['quantity'],
+        3,
+      );
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ? AND referenceId = ?',
+          whereArgs: ['PURCHASE_RETURN_HANDOVER', 'pr-ho-first-$suffix'],
+        ),
+        hasLength(1),
+      );
+      await dataSource.recordPurchaseReturnHandover(
+        handoverId: 'pr-ho-final-$suffix',
+        handoverNumber: 'PRH-FINAL-$suffix',
+        returnId: returnId,
+        supplierId: supplierId,
+        quarantineWarehouseId: quarantineWarehouseId,
+        handoverDate: now,
+        items: [
+          PurchaseReturnHandoverItem(
+            purchaseReturnItemId: returnItemId,
+            purchaseReturnReceiptItemId: receiptItemId,
+            quantity: 2,
+          ),
+        ],
+      );
+      expect(
+        (await db.query(
+          'purchase_returns',
+          columns: ['status'],
+          where: 'id = ?',
+          whereArgs: [returnId],
+        )).single['status'],
+        ReturnStatus.completed.value,
+      );
+      expect(
+        (await db.query(
+          'stock_balances',
+          columns: ['quantity'],
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, rawMaterialId],
+        )).single['quantity'],
+        1,
+      );
+      expect(
+        await db.query(
+          'journal_entries',
+          where: 'referenceType = ?',
+          whereArgs: ['PURCHASE_RETURN_HANDOVER'],
+        ),
+        hasLength(2),
       );
     },
   );
@@ -656,7 +1246,7 @@ void main() {
         warehouseId: warehouseId,
         returnDate: now,
         salesDeliveryId: 'sales-delivery-factor-sales-$suffix',
-        status: ReturnStatus.approved,
+        status: ReturnStatus.pending,
         items: [
           SalesReturnItem(
             id: 'sr-factor-item-$suffix',
@@ -672,6 +1262,44 @@ void main() {
             sourceDeliveryItemId: deliveryItemId,
           ),
         ],
+      );
+      await receiveSalesReturnItems(
+        returnId: 'sr-factor-$suffix',
+        receiptKey: 'factor-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: 'sr-factor-item-$suffix',
+            quantity: 4,
+          ),
+        ],
+      );
+      await inspectSalesReturn(
+        returnId: 'sr-factor-$suffix',
+        inspectionKey: 'factor-$suffix',
+        itemId: productId,
+        itemType: 'PRODUCT',
+        items: [
+          QualityInspectionItem(
+            id: 'qi-factor-item-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            requestedQuantity: 4,
+            inspectedQuantity: 4,
+            acceptedQuantity: 4,
+            rejectedQuantity: 0,
+            sourceReturnItemId: 'sr-factor-item-$suffix',
+            productId: productId,
+            inventoryIdentityKind: 'BASE',
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: purchaseUnitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 12,
+          ),
+        ],
+      );
+      await dataSource.updateSalesReturnStatus(
+        'sr-factor-$suffix',
+        ReturnStatus.approved,
       );
 
       final returnItem = (await db.query(
@@ -921,13 +1549,12 @@ void main() {
         throwsException,
       );
 
-      await dataSource.updatePurchaseReturnStatus(
-        firstReturn.id,
-        ReturnStatus.approved,
-      );
-      await dataSource.updatePurchaseReturnStatus(
-        firstReturn.id,
-        ReturnStatus.approved,
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(
+          firstReturn.id,
+          ReturnStatus.approved,
+        ),
+        throwsException,
       );
       expect(
         (await db.query(
@@ -935,7 +1562,7 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        78,
+        150,
       );
       expect(
         (await db.query(
@@ -943,7 +1570,7 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        48,
+        120,
       );
       expect(
         await db.query(
@@ -951,7 +1578,7 @@ void main() {
           where: 'referenceType = ? AND referenceId = ?',
           whereArgs: ['PURCHASE_RETURN', firstReturn.id],
         ),
-        hasLength(1),
+        isEmpty,
       );
       await expectLater(
         dataSource.createPurchaseReturn(
@@ -1006,6 +1633,61 @@ void main() {
         'averageCost': 2,
         'updatedAt': now.millisecondsSinceEpoch,
       });
+      await dataSource.createSalesReturn(
+        id: 'sr-rollback-$suffix',
+        returnNumber: 'SR-ROLLBACK-$suffix',
+        salesOrderId: 'sales-order-$suffix',
+        customerId: customerId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        salesDeliveryId: 'sales-delivery-sales-rollback-$suffix',
+        items: [
+          SalesReturnItem(
+            id: 'sr-rollback-item-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            quantity: 1,
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+            baseQuantity: 1,
+            sourceDeliveryItemId: deliveryItemId,
+          ),
+        ],
+      );
+      await receiveSalesReturnItems(
+        returnId: 'sr-rollback-$suffix',
+        receiptKey: 'rollback-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: 'sr-rollback-item-$suffix',
+            quantity: 1,
+          ),
+        ],
+      );
+      await inspectSalesReturn(
+        returnId: 'sr-rollback-$suffix',
+        inspectionKey: 'rollback-$suffix',
+        itemId: productId,
+        itemType: 'PRODUCT',
+        items: [
+          QualityInspectionItem(
+            id: 'qi-rollback-item-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            requestedQuantity: 1,
+            inspectedQuantity: 1,
+            acceptedQuantity: 1,
+            rejectedQuantity: 0,
+            sourceReturnItemId: 'sr-rollback-item-$suffix',
+            productId: productId,
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+          ),
+        ],
+      );
       await db.execute('''
       CREATE TRIGGER fail_sales_return_journal
       BEFORE INSERT ON journal_entries
@@ -1016,29 +1698,9 @@ void main() {
     ''');
       try {
         await expectLater(
-          dataSource.createSalesReturn(
-            id: 'sr-rollback-$suffix',
-            returnNumber: 'SR-ROLLBACK-$suffix',
-            salesOrderId: 'sales-order-$suffix',
-            customerId: customerId,
-            warehouseId: warehouseId,
-            returnDate: now,
-            salesDeliveryId: 'sales-delivery-sales-rollback-$suffix',
-            status: ReturnStatus.approved,
-            items: [
-              SalesReturnItem(
-                id: 'sr-rollback-item-$suffix',
-                itemId: productId,
-                itemType: 'PRODUCT',
-                quantity: 1,
-                unitId: unitId,
-                baseUnitId: unitId,
-                unitConversionFactor: 1,
-                baseQuantity: 1,
-                qualityStatus: ReturnQualityStatus.approved,
-                sourceDeliveryItemId: deliveryItemId,
-              ),
-            ],
+          dataSource.updateSalesReturnStatus(
+            'sr-rollback-$suffix',
+            ReturnStatus.approved,
           ),
           throwsException,
         );
@@ -1051,7 +1713,7 @@ void main() {
           where: 'id = ?',
           whereArgs: ['sr-rollback-$suffix'],
         ),
-        isEmpty,
+        hasLength(1),
       );
       expect(
         (await db.query(
@@ -1076,6 +1738,23 @@ void main() {
           whereArgs: [warehouseId, productId],
         ),
         isEmpty,
+      );
+      expect(
+        (await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        1,
+      );
+      expect(
+        (await db.query(
+          'sales_returns',
+          columns: ['status'],
+          where: 'id = ?',
+          whereArgs: ['sr-rollback-$suffix'],
+        )).single['status'],
+        'PENDING',
       );
       expect(
         await db.query(
@@ -1183,6 +1862,39 @@ void main() {
       final finalReturn = await reserveSalesReturn(
         'sr-pending-approved-$suffix',
         10,
+      );
+      await receiveSalesReturnItems(
+        returnId: finalReturn.id,
+        receiptKey: 'reservation-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: 'sr-pending-approved-$suffix-item',
+            quantity: 10,
+          ),
+        ],
+      );
+      await inspectSalesReturn(
+        returnId: finalReturn.id,
+        inspectionKey: 'reservation-$suffix',
+        itemId: productId,
+        itemType: 'PRODUCT',
+        items: [
+          QualityInspectionItem(
+            id: 'qi-reservation-$suffix',
+            itemId: productId,
+            itemType: 'PRODUCT',
+            requestedQuantity: 10,
+            inspectedQuantity: 10,
+            acceptedQuantity: 10,
+            rejectedQuantity: 0,
+            sourceReturnItemId: 'sr-pending-approved-$suffix-item',
+            productId: productId,
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: purchaseUnitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 12,
+          ),
+        ],
       );
       await dataSource.updateSalesReturnStatus(
         finalReturn.id,
@@ -1675,53 +2387,119 @@ void main() {
   );
 
   test(
-    'failed purchase return journal posting rolls back stock and valuation',
+    'failed supplier handover journal rolls back stock and handover records',
     () async {
       final db = await FurnexaDatabase.instance.database;
+      final returnId = 'pr-rollback-$suffix';
+      final returnItemId = 'pr-rollback-item-$suffix';
+      final receiptId = 'pr-rollback-receipt-$suffix';
+      await dataSource.createPurchaseReturn(
+        id: returnId,
+        returnNumber: 'PR-ROLLBACK-$suffix',
+        purchaseOrderId: 'purchase-order-$suffix',
+        supplierId: supplierId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        items: [
+          PurchaseReturnItem(
+            id: returnItemId,
+            itemId: rawMaterialId,
+            itemType: 'RAW_MATERIAL',
+            quantity: 5,
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+            baseQuantity: 5,
+            inventoryIdentityKind: 'BASE',
+            identitySnapshotStatus: 'VERIFIED',
+          ),
+        ],
+      );
+      await dataSource.receivePurchaseReturn(
+        returnId: returnId,
+        receiptId: receiptId,
+        receiptNumber: 'PRR-ROLLBACK-$suffix',
+        quarantineWarehouseId: quarantineWarehouseId,
+        receiptDate: now,
+        items: [
+          PurchaseReturnReceiptItem(
+            purchaseReturnItemId: returnItemId,
+            quantity: 5,
+          ),
+        ],
+      );
+      await dataSource.createQualityInspection(
+        id: 'pr-rollback-qi-$suffix',
+        inspectionNumber: 'PRQI-ROLLBACK-$suffix',
+        sourceType: 'PURCHASE_RETURN',
+        sourceId: returnId,
+        purchaseReturnReceiptId: receiptId,
+        warehouseId: quarantineWarehouseId,
+        itemId: rawMaterialId,
+        itemType: 'RAW_MATERIAL',
+        inspectionDate: now,
+        status: QualityInspectionStatus.completed,
+        items: [
+          QualityInspectionItem(
+            id: 'pr-rollback-qii-$suffix',
+            itemId: rawMaterialId,
+            itemType: 'RAW_MATERIAL',
+            sourceReturnItemId: returnItemId,
+            purchaseReturnReceiptItemId: '$receiptId:$returnItemId',
+            productId: rawMaterialId,
+            inventoryIdentityKind: 'BASE',
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: unitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 1,
+            requestedQuantity: 5,
+            inspectedQuantity: 5,
+            acceptedQuantity: 5,
+            rejectedQuantity: 0,
+          ),
+        ],
+      );
+      await dataSource.updatePurchaseReturnStatus(
+        returnId,
+        ReturnStatus.approved,
+      );
       await db.execute('''
-      CREATE TRIGGER fail_purchase_return_journal
+      CREATE TRIGGER fail_purchase_return_handover_journal
       BEFORE INSERT ON journal_entries
-      WHEN NEW.referenceType = 'PURCHASE_RETURN'
+      WHEN NEW.referenceType = 'PURCHASE_RETURN_HANDOVER'
       BEGIN
-        SELECT RAISE(ABORT, 'injected purchase return journal failure');
+        SELECT RAISE(ABORT, 'injected Purchase Return handover journal failure');
       END
     ''');
       try {
         await expectLater(
-          dataSource.createPurchaseReturn(
-            id: 'pr-rollback-$suffix',
-            returnNumber: 'PR-ROLLBACK-$suffix',
-            purchaseOrderId: 'purchase-order-$suffix',
+          dataSource.recordPurchaseReturnHandover(
+            handoverId: 'pr-rollback-handover-$suffix',
+            handoverNumber: 'PRH-ROLLBACK-$suffix',
+            returnId: returnId,
             supplierId: supplierId,
-            warehouseId: warehouseId,
-            returnDate: now,
-            status: ReturnStatus.approved,
+            quarantineWarehouseId: quarantineWarehouseId,
+            handoverDate: now,
             items: [
-              PurchaseReturnItem(
-                id: 'pr-rollback-item-$suffix',
-                itemId: rawMaterialId,
-                itemType: 'RAW_MATERIAL',
+              PurchaseReturnHandoverItem(
+                purchaseReturnItemId: returnItemId,
+                purchaseReturnReceiptItemId: '$receiptId:$returnItemId',
                 quantity: 5,
-                unitId: unitId,
-                baseUnitId: unitId,
-                unitConversionFactor: 1,
-                baseQuantity: 5,
-                inventoryIdentityKind: 'BASE',
-                identitySnapshotStatus: 'VERIFIED',
-                qualityStatus: ReturnQualityStatus.approved,
               ),
             ],
           ),
           throwsException,
         );
       } finally {
-        await db.execute('DROP TRIGGER IF EXISTS fail_purchase_return_journal');
+        await db.execute(
+          'DROP TRIGGER IF EXISTS fail_purchase_return_handover_journal',
+        );
       }
       expect(
         await db.query(
-          'purchase_returns',
+          'purchase_return_handovers',
           where: 'id = ?',
-          whereArgs: ['pr-rollback-$suffix'],
+          whereArgs: ['pr-rollback-handover-$suffix'],
         ),
         isEmpty,
       );
@@ -1729,23 +2507,26 @@ void main() {
         (await db.query(
           'stock_balances',
           where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, rawMaterialId],
+          whereArgs: [quarantineWarehouseId, rawMaterialId],
         )).single['quantity'],
-        20,
+        5,
       );
       expect(
         (await db.query(
           'inventory_valuations',
           where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, rawMaterialId],
+          whereArgs: [quarantineWarehouseId, rawMaterialId],
         )).single['quantity'],
-        20,
+        5,
       );
       expect(
         await db.query(
           'journal_entries',
           where: 'referenceType = ? AND referenceId = ?',
-          whereArgs: ['PURCHASE_RETURN', 'pr-rollback-$suffix'],
+          whereArgs: [
+            'PURCHASE_RETURN_HANDOVER',
+            'pr-rollback-handover-$suffix',
+          ],
         ),
         isEmpty,
       );
@@ -1824,9 +2605,12 @@ void main() {
         'purchase-order-variant-item-$suffix',
         'purchase-order-second-variant-item-$suffix',
       });
-      await dataSource.updatePurchaseReturnStatus(
-        'pr-variant-$variantId-$suffix',
-        ReturnStatus.approved,
+      await expectLater(
+        dataSource.updatePurchaseReturnStatus(
+          'pr-variant-$variantId-$suffix',
+          ReturnStatus.approved,
+        ),
+        throwsException,
       );
       for (final variant in [variantId, secondVariantId]) {
         expect(
@@ -1835,7 +2619,7 @@ void main() {
             where: 'warehouseId = ? AND itemId = ?',
             whereArgs: [warehouseId, '__FURNEXA_VARIANT__:$variant'],
           )).single['quantity'],
-          variant == variantId ? 0 : 120,
+          120,
         );
         expect(
           (await db.query(
@@ -1843,7 +2627,7 @@ void main() {
             where: 'warehouseId = ? AND itemId = ?',
             whereArgs: [warehouseId, '__FURNEXA_VARIANT__:$variant'],
           )).single['quantity'],
-          variant == variantId ? 0 : 120,
+          120,
         );
       }
       await expectLater(
@@ -1982,7 +2766,7 @@ void main() {
   );
 
   test(
-    'quality inspection on a pending return does not post stock until approval',
+    'rejected sales return remains quarantined without a sellable stockout or credit',
     () async {
       final db = await FurnexaDatabase.instance.database;
       final returnId = 'sr-$suffix';
@@ -2019,8 +2803,16 @@ void main() {
             inventoryIdentityKind: 'BASE',
             identitySnapshotStatus: 'VERIFIED',
             unitPrice: 5,
+            qualityStatus: ReturnQualityStatus.rejected,
             sourceDeliveryItemId: deliveryItemId,
           ),
+        ],
+      );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'qc-rejected-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 1),
         ],
       );
       await dataSource.saveQualityInspection(
@@ -2029,7 +2821,7 @@ void main() {
           inspectionNumber: 'QI-$suffix',
           sourceType: 'SALES_RETURN',
           sourceId: returnId,
-          warehouseId: warehouseId,
+          warehouseId: quarantineWarehouseId,
           itemId: productId,
           itemType: 'PRODUCT',
           inspectedBy: 'admin',
@@ -2123,15 +2915,13 @@ void main() {
             whereArgs: [warehouseId, productId],
             limit: 1,
           );
-      expect((approvedStock.single['quantity'] as num).toDouble(), 38);
+      expect((approvedStock.single['quantity'] as num).toDouble(), 50);
       final postedMovements = await db.query(
         'stock_transactions',
         where: 'warehouseId = ? AND itemId = ? AND reference = ?',
         whereArgs: [warehouseId, productId, returnNumber],
       );
-      expect(postedMovements, hasLength(1));
-      expect(postedMovements.single['transactionType'], 'STOCK_OUT');
-      expect((postedMovements.single['quantity'] as num).toDouble(), 12);
+      expect(postedMovements, isEmpty);
       final approvedPostedReturnTotal = await db.rawQuery(
         '''
         SELECT COALESCE(SUM(sri.baseQuantity), 0) AS total
@@ -2158,6 +2948,18 @@ void main() {
         ),
         isEmpty,
       );
+      final quarantinedStock = await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [quarantineWarehouseId, productId],
+      );
+      expect((quarantinedStock.single['quantity'] as num).toDouble(), 12);
+      final quarantinedValuation = await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [quarantineWarehouseId, productId, 'PRODUCT'],
+      );
+      expect((quarantinedValuation.single['quantity'] as num).toDouble(), 12);
 
       await dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved);
       final finalStock = await (await FurnexaDatabase.instance.database).query(
@@ -2166,14 +2968,14 @@ void main() {
         whereArgs: [warehouseId, productId],
         limit: 1,
       );
-      expect((finalStock.single['quantity'] as num).toDouble(), 38);
+      expect((finalStock.single['quantity'] as num).toDouble(), 50);
       expect(
         await db.query(
           'stock_transactions',
           where: 'warehouseId = ? AND itemId = ? AND reference = ?',
           whereArgs: [warehouseId, productId, returnNumber],
         ),
-        hasLength(1),
+        isEmpty,
       );
       final finalPostedReturnTotal = await db.rawQuery(
         '''
@@ -2228,12 +3030,19 @@ void main() {
           ),
         ],
       );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'accepted-only-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 4),
+        ],
+      );
       await dataSource.createQualityInspection(
         id: 'qi-quality-accepted-only-$suffix',
         inspectionNumber: 'QI-QC-ACCEPTED-ONLY-$suffix',
         sourceType: 'SALES_RETURN',
         sourceId: returnId,
-        warehouseId: warehouseId,
+        warehouseId: quarantineWarehouseId,
         itemId: productId,
         itemType: 'PRODUCT',
         inspectionDate: now,
@@ -2245,9 +3054,9 @@ void main() {
             itemId: productId,
             itemType: 'PRODUCT',
             requestedQuantity: 4,
-            inspectedQuantity: 3,
+            inspectedQuantity: 4,
             acceptedQuantity: 3,
-            rejectedQuantity: 0,
+            rejectedQuantity: 1,
             sourceReturnItemId: returnItemId,
             productId: productId,
             inventoryIdentityKind: 'BASE',
@@ -2265,7 +3074,7 @@ void main() {
         whereArgs: ['qi-quality-accepted-only-$suffix'],
       )).single;
       expect(inspectionItem['acceptedBaseQuantity'], 36);
-      expect(inspectionItem['rejectedBaseQuantity'], 0);
+      expect(inspectionItem['rejectedBaseQuantity'], 12);
       expect(
         (await db.query(
           'stock_balances',
@@ -2290,15 +3099,268 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        50,
+        86,
       );
-      expect(
-        await db.query(
-          'stock_transactions',
-          where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, productId],
+      final sellableMovement = (await db.query(
+        'stock_transactions',
+        where: 'warehouseId = ? AND itemId = ? AND transactionType = ?',
+        whereArgs: [warehouseId, productId, 'TRANSFER_IN'],
+      )).single;
+      expect(sellableMovement['quantity'], 36);
+      final rejectedStock = (await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [quarantineWarehouseId, productId],
+      )).single;
+      expect(rejectedStock['quantity'], 12);
+      final sellableValuation = (await db.query(
+        'inventory_valuations',
+        where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+        whereArgs: [warehouseId, productId, 'PRODUCT'],
+      )).single;
+      expect(sellableValuation['quantity'], 36);
+      final salesJournal = (await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_RETURN', returnId],
+      )).single;
+      final journalLines = await db.rawQuery(
+        '''
+        SELECT a.code, jl.debit, jl.credit
+        FROM journal_lines jl JOIN accounts a ON a.id = jl.accountId
+        WHERE jl.journalEntryId = ?
+        ''',
+        [salesJournal['id']],
+      );
+      final journalByAccount = {
+        for (final line in journalLines) line['code']: line,
+      };
+      expect(journalByAccount['4000']!['debit'], 15);
+      expect(journalByAccount['1200']!['credit'], 15);
+    },
+  );
+
+  test('pending QC cannot authorize sales return posting', () async {
+    final db = await FurnexaDatabase.instance.database;
+    final returnId = 'sr-pending-qc-$suffix';
+    final returnItemId = 'sr-pending-qc-item-$suffix';
+    final deliveryItemId = await seedDeliveredSalesLine(
+      id: 'pending-qc-$suffix',
+      sourceProductId: productId,
+      salesUnitId: unitId,
+      quantity: 2,
+      deliveredQuantity: 2,
+      factor: 1,
+      unitRevenue: 5,
+      unitCogs: 2,
+    );
+    await dataSource.createSalesReturn(
+      id: returnId,
+      returnNumber: 'SR-PENDING-QC-$suffix',
+      salesOrderId: 'sales-order-$suffix',
+      customerId: customerId,
+      warehouseId: warehouseId,
+      returnDate: now,
+      salesDeliveryId: 'sales-delivery-pending-qc-$suffix',
+      items: [
+        SalesReturnItem(
+          id: returnItemId,
+          itemId: productId,
+          itemType: 'PRODUCT',
+          quantity: 2,
+          unitId: unitId,
+          baseUnitId: unitId,
+          baseQuantity: 2,
+          identitySnapshotStatus: 'VERIFIED',
+          sourceDeliveryItemId: deliveryItemId,
         ),
-        isEmpty,
+      ],
+    );
+    await receiveSalesReturnItems(
+      returnId: returnId,
+      receiptKey: 'pending-qc-$suffix',
+      items: [
+        SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 2),
+      ],
+    );
+    await inspectSalesReturn(
+      returnId: returnId,
+      inspectionKey: 'pending-qc-$suffix',
+      itemId: productId,
+      itemType: 'PRODUCT',
+      status: QualityInspectionStatus.inProgress,
+      items: [
+        QualityInspectionItem(
+          id: 'qi-pending-qc-item-$suffix',
+          itemId: productId,
+          itemType: 'PRODUCT',
+          requestedQuantity: 2,
+          inspectedQuantity: 2,
+          acceptedQuantity: 2,
+          rejectedQuantity: 0,
+          sourceReturnItemId: returnItemId,
+          productId: productId,
+          identitySnapshotStatus: 'VERIFIED',
+          unitId: unitId,
+          baseUnitId: unitId,
+          unitConversionFactor: 1,
+        ),
+      ],
+    );
+
+    await expectLater(
+      dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved),
+      throwsException,
+    );
+    expect(
+      (await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [warehouseId, productId],
+      )).single['quantity'],
+      50,
+    );
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_RETURN', returnId],
+      ),
+      isEmpty,
+    );
+
+    await dataSource.updateQualityInspectionStatus(
+      'qi-pending-qc-$suffix',
+      QualityInspectionStatus.completed,
+    );
+    await dataSource.updateQualityInspectionStatus(
+      'qi-pending-qc-$suffix',
+      QualityInspectionStatus.completed,
+    );
+    await dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved);
+    await dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved);
+    expect(
+      (await db.query(
+        'stock_balances',
+        where: 'warehouseId = ? AND itemId = ?',
+        whereArgs: [warehouseId, productId],
+      )).single['quantity'],
+      52,
+    );
+    expect(
+      await db.query(
+        'journal_entries',
+        where: 'referenceType = ? AND referenceId = ?',
+        whereArgs: ['SALES_RETURN', returnId],
+      ),
+      hasLength(1),
+    );
+  });
+
+  test(
+    'quality inspection cannot exceed physically received quantity',
+    () async {
+      final db = await FurnexaDatabase.instance.database;
+      final returnId = 'sr-partial-receipt-qc-$suffix';
+      final returnItemId = 'sr-partial-receipt-qc-item-$suffix';
+      final deliveryItemId = await seedDeliveredSalesLine(
+        id: 'partial-receipt-qc-$suffix',
+        sourceProductId: productId,
+        salesUnitId: unitId,
+        quantity: 4,
+        deliveredQuantity: 4,
+        factor: 1,
+        unitRevenue: 5,
+        unitCogs: 2,
+      );
+      await dataSource.createSalesReturn(
+        id: returnId,
+        returnNumber: 'SR-PARTIAL-RECEIPT-QC-$suffix',
+        salesOrderId: 'sales-order-$suffix',
+        customerId: customerId,
+        warehouseId: warehouseId,
+        returnDate: now,
+        salesDeliveryId: 'sales-delivery-partial-receipt-qc-$suffix',
+        items: [
+          SalesReturnItem(
+            id: returnItemId,
+            itemId: productId,
+            itemType: 'PRODUCT',
+            quantity: 4,
+            unitId: unitId,
+            baseUnitId: unitId,
+            baseQuantity: 4,
+            identitySnapshotStatus: 'VERIFIED',
+            sourceDeliveryItemId: deliveryItemId,
+          ),
+        ],
+      );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'partial-receipt-qc-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 2),
+        ],
+      );
+
+      Future<void> expectInvalidInspection({
+        required String id,
+        required double requested,
+        required double inspected,
+        required double accepted,
+        required double rejected,
+      }) async {
+        await expectLater(
+          inspectSalesReturn(
+            returnId: returnId,
+            inspectionKey: id,
+            itemId: productId,
+            itemType: 'PRODUCT',
+            items: [
+              QualityInspectionItem(
+                id: 'qi-$id-item',
+                itemId: productId,
+                itemType: 'PRODUCT',
+                requestedQuantity: requested,
+                inspectedQuantity: inspected,
+                acceptedQuantity: accepted,
+                rejectedQuantity: rejected,
+                sourceReturnItemId: returnItemId,
+                productId: productId,
+                identitySnapshotStatus: 'VERIFIED',
+                unitId: unitId,
+                baseUnitId: unitId,
+                unitConversionFactor: 1,
+              ),
+            ],
+          ),
+          throwsException,
+        );
+      }
+
+      await expectInvalidInspection(
+        id: 'over-received-request-$suffix',
+        requested: 3,
+        inspected: 3,
+        accepted: 3,
+        rejected: 0,
+      );
+      await expectInvalidInspection(
+        id: 'over-received-disposition-$suffix',
+        requested: 2,
+        inspected: 2,
+        accepted: 2,
+        rejected: 1,
+      );
+      expect(await db.query('quality_inspections'), isEmpty);
+      expect(await db.query('quality_inspection_items'), isEmpty);
+      expect(
+        (await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        2,
       );
     },
   );
@@ -2341,6 +3403,13 @@ void main() {
             identitySnapshotStatus: 'VERIFIED',
             sourceDeliveryItemId: deliveryItemId,
           ),
+        ],
+      );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'invalid-qc-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 10),
         ],
       );
 
@@ -2408,6 +3477,13 @@ void main() {
           accepted: 0.0,
           rejected: 0.0,
         ),
+        (
+          id: 'accepted-and-rejected-exceed-received',
+          requested: 10.0,
+          inspected: 10.0,
+          accepted: 6.0,
+          rejected: 5.0,
+        ),
       ];
       for (final invalid in invalidCases) {
         await expectLater(
@@ -2416,7 +3492,7 @@ void main() {
             inspectionNumber: 'QI-${invalid.id}-$suffix',
             sourceType: 'SALES_RETURN',
             sourceId: returnId,
-            warehouseId: warehouseId,
+            warehouseId: quarantineWarehouseId,
             itemId: productId,
             itemType: 'PRODUCT',
             inspectionDate: now,
@@ -2498,13 +3574,20 @@ void main() {
           ),
         ],
       );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'quality-conversion-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 10),
+        ],
+      );
 
       await dataSource.createQualityInspection(
         id: 'qi-quality-conversion-$suffix',
         inspectionNumber: 'QI-QC-CONVERSION-$suffix',
         sourceType: 'SALES_RETURN',
         sourceId: returnId,
-        warehouseId: warehouseId,
+        warehouseId: quarantineWarehouseId,
         itemId: productId,
         itemType: 'PRODUCT',
         inspectionDate: now,
@@ -2516,9 +3599,9 @@ void main() {
             itemId: productId,
             itemType: 'PRODUCT',
             requestedQuantity: 10,
-            inspectedQuantity: 5,
+            inspectedQuantity: 10,
             acceptedQuantity: 3,
-            rejectedQuantity: 2,
+            rejectedQuantity: 7,
             sourceReturnItemId: returnItemId,
             productId: productId,
             inventoryIdentityKind: 'BASE',
@@ -2547,8 +3630,8 @@ void main() {
       expect(inspectionItem['baseUnitId'], unitId);
       expect(inspectionItem['unitConversionFactor'], 12);
       expect(inspectionItem['requestedBaseQuantity'], 120);
-      expect(inspectionItem['inspectedBaseQuantity'], 60);
-      expect(inspectionItem['rejectedBaseQuantity'], 24);
+      expect(inspectionItem['inspectedBaseQuantity'], 120);
+      expect(inspectionItem['rejectedBaseQuantity'], 84);
       final reloadedInspection = (await dataSource.qualityInspections(
         sourceType: 'SALES_RETURN',
       )).single;
@@ -2556,7 +3639,7 @@ void main() {
       expect(reloadedInspection.items.single.sourceReturnItemId, returnItemId);
       expect(reloadedInspection.items.single.variantId, isNull);
       expect(reloadedInspection.items.single.unitConversionFactor, 12);
-      expect(reloadedInspection.items.single.rejectedBaseQuantity, 24);
+      expect(reloadedInspection.items.single.rejectedBaseQuantity, 84);
       expect(
         await db.query(
           'stock_transactions',
@@ -2572,16 +3655,36 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        26,
+        86,
       );
       final postedMovements = await db.query(
         'stock_transactions',
         where: 'warehouseId = ? AND itemId = ? AND reference = ?',
         whereArgs: [warehouseId, productId, returnNumber],
       );
-      expect(postedMovements, hasLength(1));
-      expect(postedMovements.single['transactionType'], 'STOCK_OUT');
-      expect((postedMovements.single['quantity'] as num).toDouble(), 24);
+      expect(postedMovements, isEmpty);
+      final acceptedMovement = (await db.query(
+        'stock_transactions',
+        where: 'warehouseId = ? AND itemId = ? AND transactionType = ?',
+        whereArgs: [warehouseId, productId, 'TRANSFER_IN'],
+      )).single;
+      expect((acceptedMovement['quantity'] as num).toDouble(), 36);
+      expect(
+        (await db.query(
+          'stock_balances',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        84,
+      );
+      expect(
+        (await db.query(
+          'inventory_valuations',
+          where: 'warehouseId = ? AND itemId = ? AND itemType = ?',
+          whereArgs: [warehouseId, productId, 'PRODUCT'],
+        )).single['quantity'],
+        36,
+      );
       await expectLater(
         dataSource.createQualityInspection(
           id: 'qi-quality-conversion-retry-$suffix',
@@ -2615,13 +3718,13 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        26,
+        86,
       );
       expect(
         await db.query(
           'stock_transactions',
-          where: 'warehouseId = ? AND itemId = ? AND reference = ?',
-          whereArgs: [warehouseId, productId, returnNumber],
+          where: 'warehouseId = ? AND itemId = ? AND transactionType = ?',
+          whereArgs: [warehouseId, productId, 'TRANSFER_IN'],
         ),
         hasLength(1),
       );
@@ -2726,6 +3829,20 @@ void main() {
             )
             .toList(),
       );
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'quality-variant-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: firstSourceLine,
+            quantity: 10,
+          ),
+          SalesReturnReceiptItem(
+            salesReturnItemId: secondSourceLine,
+            quantity: 10,
+          ),
+        ],
+      );
       for (final variant in [variantId, secondVariantId]) {
         await db.insert('stock_balances', {
           'id': 'quality-variant-stock-$variant-$suffix',
@@ -2748,7 +3865,7 @@ void main() {
           inspectionNumber: 'QI-QC-WRONG-SOURCE-$suffix',
           sourceType: 'SALES_RETURN',
           sourceId: returnId,
-          warehouseId: warehouseId,
+          warehouseId: quarantineWarehouseId,
           itemId: variantProductId,
           itemType: 'PRODUCT',
           inspectionDate: now,
@@ -2882,7 +3999,7 @@ void main() {
         inspectionNumber: 'QI-QC-VARIANT-OK-$suffix',
         sourceType: 'SALES_RETURN',
         sourceId: returnId,
-        warehouseId: warehouseId,
+        warehouseId: quarantineWarehouseId,
         itemId: variantProductId,
         itemType: 'PRODUCT',
         inspectionDate: now,
@@ -2894,9 +4011,9 @@ void main() {
             itemId: variantProductId,
             itemType: 'PRODUCT',
             requestedQuantity: 10,
-            inspectedQuantity: 3,
-            acceptedQuantity: 1,
-            rejectedQuantity: 2,
+            inspectedQuantity: 10,
+            acceptedQuantity: 2,
+            rejectedQuantity: 8,
             sourceReturnItemId: firstSourceLine,
             productId: variantProductId,
             variantId: variantId,
@@ -2906,6 +4023,24 @@ void main() {
             baseUnitId: unitId,
             unitConversionFactor: 12,
             result: QualityInspectionResult.quarantined,
+          ),
+          QualityInspectionItem(
+            id: 'qi-quality-variant-second-item-$suffix',
+            itemId: variantProductId,
+            itemType: 'PRODUCT',
+            requestedQuantity: 10,
+            inspectedQuantity: 10,
+            acceptedQuantity: 0,
+            rejectedQuantity: 10,
+            sourceReturnItemId: secondSourceLine,
+            productId: variantProductId,
+            variantId: secondVariantId,
+            inventoryIdentityKind: 'VARIANT',
+            identitySnapshotStatus: 'VERIFIED',
+            unitId: purchaseUnitId,
+            baseUnitId: unitId,
+            unitConversionFactor: 12,
+            result: QualityInspectionResult.rejected,
           ),
         ],
       );
@@ -2940,7 +4075,7 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, '__FURNEXA_VARIANT__:$variantId'],
         )).single['quantity'],
-        76,
+        124,
       );
       expect(
         (await db.query(
@@ -2952,8 +4087,12 @@ void main() {
       );
       final variantMovements = await db.query(
         'stock_transactions',
-        where: 'warehouseId = ? AND reference = ?',
-        whereArgs: [warehouseId, returnNumber],
+        where: 'warehouseId = ? AND itemId = ? AND transactionType = ?',
+        whereArgs: [
+          warehouseId,
+          '__FURNEXA_VARIANT__:$variantId',
+          'TRANSFER_IN',
+        ],
       );
       expect(variantMovements, hasLength(1));
       expect(
@@ -3005,6 +4144,16 @@ void main() {
           ),
         ],
       );
+      await receiveSalesReturnItems(
+        returnId: firstReturnId,
+        receiptKey: 'quality-exact-$suffix',
+        items: [
+          SalesReturnReceiptItem(
+            salesReturnItemId: firstReturnItemId,
+            quantity: 2,
+          ),
+        ],
+      );
       await db.insert('sales_returns', {
         'id': secondReturnId,
         'returnNumber': 'SR-QC-EXACT-SECOND-$suffix',
@@ -3044,7 +4193,7 @@ void main() {
             inspectionNumber: 'QI-$id-$suffix',
             sourceType: 'SALES_RETURN',
             sourceId: firstReturnId,
-            warehouseId: warehouseId,
+            warehouseId: quarantineWarehouseId,
             itemId: productId,
             itemType: 'PRODUCT',
             inspectionDate: now,
@@ -3142,15 +4291,9 @@ void main() {
   );
 
   test(
-    'quality approval stock failure rolls back and remains retryable',
+    'accepted stock transfer failure rolls back approval and remains retryable',
     () async {
       final db = await FurnexaDatabase.instance.database;
-      await db.update(
-        'stock_balances',
-        {'quantity': 1},
-        where: 'warehouseId = ? AND itemId = ?',
-        whereArgs: [warehouseId, productId],
-      );
       final returnId = 'sr-quality-failure-$suffix';
       final returnItemId = 'sr-quality-failure-item-$suffix';
       final returnNumber = 'SR-QC-FAILURE-$suffix';
@@ -3187,18 +4330,18 @@ void main() {
           ),
         ],
       );
-
-      await dataSource.createQualityInspection(
-        id: 'qi-quality-failure-$suffix',
-        inspectionNumber: 'QI-QC-FAILURE-$suffix',
-        sourceType: 'SALES_RETURN',
-        sourceId: returnId,
-        warehouseId: warehouseId,
+      await receiveSalesReturnItems(
+        returnId: returnId,
+        receiptKey: 'transfer-failure-$suffix',
+        items: [
+          SalesReturnReceiptItem(salesReturnItemId: returnItemId, quantity: 2),
+        ],
+      );
+      await inspectSalesReturn(
+        returnId: returnId,
+        inspectionKey: 'transfer-failure-$suffix',
         itemId: productId,
         itemType: 'PRODUCT',
-        inspectionDate: now,
-        status: QualityInspectionStatus.completed,
-        result: QualityInspectionResult.rejected,
         items: [
           QualityInspectionItem(
             id: 'qi-quality-failure-item-$suffix',
@@ -3206,8 +4349,8 @@ void main() {
             itemType: 'PRODUCT',
             requestedQuantity: 2,
             inspectedQuantity: 2,
-            acceptedQuantity: 0,
-            rejectedQuantity: 2,
+            acceptedQuantity: 2,
+            rejectedQuantity: 0,
             sourceReturnItemId: returnItemId,
             productId: productId,
             identitySnapshotStatus: 'VERIFIED',
@@ -3217,32 +4360,44 @@ void main() {
           ),
         ],
       );
+      await db.execute('''
+        CREATE TRIGGER fail_sales_return_transfer
+        BEFORE INSERT ON stock_transactions
+        WHEN NEW.transactionType = 'TRANSFER_IN'
+          AND NEW.reference LIKE 'SALES_RETURN_ACCEPTED:%'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected sales return transfer failure');
+        END
+      ''');
+      try {
+        await expectLater(
+          dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved),
+          throwsException,
+        );
+      } finally {
+        await db.execute('DROP TRIGGER IF EXISTS fail_sales_return_transfer');
+      }
       expect(
         (await db.query(
           'stock_balances',
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        1,
+        50,
       );
       expect(
-        await db.query(
-          'stock_transactions',
+        (await db.query(
+          'stock_balances',
           where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, productId],
-        ),
-        isEmpty,
-      );
-
-      await expectLater(
-        dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved),
-        throwsException,
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        2,
       );
       expect(
         await db.query(
           'quality_inspections',
           where: 'id = ?',
-          whereArgs: ['qi-quality-failure-$suffix'],
+          whereArgs: ['qi-transfer-failure-$suffix'],
         ),
         hasLength(1),
       );
@@ -3250,17 +4405,9 @@ void main() {
         await db.query(
           'quality_inspection_items',
           where: 'inspectionId = ?',
-          whereArgs: ['qi-quality-failure-$suffix'],
+          whereArgs: ['qi-transfer-failure-$suffix'],
         ),
         hasLength(1),
-      );
-      expect(
-        (await db.query(
-          'stock_balances',
-          where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, productId],
-        )).single['quantity'],
-        1,
       );
       expect(
         await db.query(
@@ -3269,6 +4416,14 @@ void main() {
           whereArgs: [warehouseId, productId],
         ),
         isEmpty,
+      );
+      expect(
+        (await db.query(
+          'inventory_valuations',
+          where: 'warehouseId = ? AND itemId = ?',
+          whereArgs: [quarantineWarehouseId, productId],
+        )).single['quantity'],
+        2,
       );
       expect(
         await db.query(
@@ -3287,21 +4442,6 @@ void main() {
         )).single['status'],
         'PENDING',
       );
-      expect(
-        await db.query(
-          'stock_transactions',
-          where: 'warehouseId = ? AND itemId = ?',
-          whereArgs: [warehouseId, productId],
-        ),
-        isEmpty,
-      );
-
-      await db.update(
-        'stock_balances',
-        {'quantity': 3},
-        where: 'warehouseId = ? AND itemId = ?',
-        whereArgs: [warehouseId, productId],
-      );
       await dataSource.updateSalesReturnStatus(returnId, ReturnStatus.approved);
       expect(
         (await db.query(
@@ -3318,12 +4458,12 @@ void main() {
           where: 'warehouseId = ? AND itemId = ?',
           whereArgs: [warehouseId, productId],
         )).single['quantity'],
-        1,
+        52,
       );
       final retriedMovements = await db.query(
         'stock_transactions',
-        where: 'warehouseId = ? AND itemId = ? AND reference = ?',
-        whereArgs: [warehouseId, productId, returnNumber],
+        where: 'warehouseId = ? AND itemId = ? AND transactionType = ?',
+        whereArgs: [warehouseId, productId, 'TRANSFER_IN'],
       );
       expect(retriedMovements, hasLength(1));
       expect((retriedMovements.single['quantity'] as num).toDouble(), 2);
@@ -3333,7 +4473,7 @@ void main() {
           where: 'referenceType = ? AND referenceId = ?',
           whereArgs: ['SALES_RETURN', returnId],
         ),
-        isEmpty,
+        hasLength(1),
       );
     },
   );

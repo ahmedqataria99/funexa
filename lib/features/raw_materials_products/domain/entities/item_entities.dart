@@ -369,7 +369,9 @@ class BomItem {
     required this.quantity,
     this.notes,
   }) {
-    if (quantity <= 0) throw ArgumentError('الكمية يجب أن تكون أكبر من صفر');
+    if (!quantity.isFinite || quantity <= 0) {
+      throw ArgumentError('الكمية يجب أن تكون أكبر من صفر');
+    }
   }
   final String id, productId, rawMaterialId;
   final double quantity;

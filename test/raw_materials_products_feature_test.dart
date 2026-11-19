@@ -108,6 +108,275 @@ void main() {
     await DatabaseTestHelper.reset();
   });
 
+  Future<void> prepareRawMaterialUnitGuard(DateTime now) async {
+    await dataSource.saveCategory(
+      Category(
+        id: 'raw-unit-guard-category',
+        name: 'Raw Material Unit Guard',
+        code: 'RAW-UNIT-GUARD',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    for (final unit in [
+      UnitEntity(
+        id: 'raw-unit-guard-base',
+        name: 'Base Unit',
+        abbreviation: 'RUB',
+        createdAt: now,
+        updatedAt: now,
+      ),
+      UnitEntity(
+        id: 'raw-unit-guard-alternate',
+        name: 'Alternate Unit',
+        abbreviation: 'RUA',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    ]) {
+      await dataSource.saveUnit(unit);
+    }
+  }
+
+  Future<RawMaterial> createGuardMaterial(String key, DateTime now) async {
+    final material = RawMaterial(
+      id: 'raw-unit-guard-material-$key',
+      name: 'Raw Material $key',
+      code: 'RUM-$key',
+      categoryId: 'raw-unit-guard-category',
+      unitId: 'raw-unit-guard-base',
+      createdAt: now,
+      updatedAt: now,
+    );
+    await dataSource.saveRawMaterial(material);
+    return material;
+  }
+
+  Future<void> addOrderMaterialSnapshot({
+    required RawMaterial material,
+    required String key,
+    required String status,
+    required DateTime now,
+    bool addCurrentBom = false,
+  }) async {
+    final db = await FurnexaDatabase.instance.database;
+    final productId = 'raw-unit-guard-product-$key';
+    final routeId = 'raw-unit-guard-route-$key';
+    final orderId = 'raw-unit-guard-order-$key';
+    await dataSource.saveProduct(
+      Product(
+        id: productId,
+        name: 'Product $key',
+        code: 'RUP-$key',
+        categoryId: 'raw-unit-guard-category',
+        unitId: 'raw-unit-guard-base',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    await db.insert('production_routes', {
+      'id': routeId,
+      'productId': productId,
+      'createdAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+    await db.insert('production_orders', {
+      'id': orderId,
+      'orderNumber': 'RUG-ORDER-$key',
+      'productId': productId,
+      'routeId': routeId,
+      'plannedQuantity': 2,
+      'producedQuantity': status == 'COMPLETED' ? 2 : 0,
+      'status': status,
+      'createdAt': now.millisecondsSinceEpoch,
+      'updatedAt': now.millisecondsSinceEpoch,
+    });
+    if (addCurrentBom) {
+      await db.insert('product_bom_items', {
+        'id': 'raw-unit-guard-current-bom-$key',
+        'productId': productId,
+        'rawMaterialId': material.id,
+        'quantity': 3,
+      });
+    }
+    await db.insert('production_order_bom_items', {
+      'id': 'raw-unit-guard-order-bom-$key',
+      'productionOrderId': orderId,
+      'rawMaterialId': material.id,
+      'unitId': 'raw-unit-guard-base',
+      'quantity': 4,
+    });
+  }
+
+  test(
+    'raw material unit change is allowed without open order snapshots',
+    () async {
+      final now = DateTime.now();
+      await prepareRawMaterialUnitGuard(now);
+      final material = await createGuardMaterial('free', now);
+
+      await dataSource.saveRawMaterial(
+        RawMaterial(
+          id: material.id,
+          name: material.name,
+          code: material.code,
+          categoryId: material.categoryId,
+          unitId: 'raw-unit-guard-alternate',
+          createdAt: material.createdAt,
+          updatedAt: now.add(const Duration(minutes: 1)),
+        ),
+      );
+
+      final saved = (await (await FurnexaDatabase.instance.database).query(
+        'raw_materials',
+        columns: ['unitId'],
+        where: 'id = ?',
+        whereArgs: [material.id],
+      )).single;
+      expect(saved['unitId'], 'raw-unit-guard-alternate');
+    },
+  );
+
+  test(
+    'raw material unit changes block all open snapshots but permit metadata edits and terminal orders',
+    () async {
+      final now = DateTime.now();
+      await prepareRawMaterialUnitGuard(now);
+      final db = await FurnexaDatabase.instance.database;
+
+      for (final status in ['DRAFT', 'PLANNED', 'IN_PROGRESS']) {
+        final material = await createGuardMaterial(status, now);
+        await addOrderMaterialSnapshot(
+          material: material,
+          key: status,
+          status: status,
+          now: now,
+        );
+        await expectLater(
+          dataSource.saveRawMaterial(
+            RawMaterial(
+              id: material.id,
+              name: 'Changed $status',
+              code: material.code,
+              categoryId: material.categoryId,
+              unitId: 'raw-unit-guard-alternate',
+              createdAt: material.createdAt,
+              updatedAt: now.add(const Duration(minutes: 1)),
+            ),
+          ),
+          throwsA(isA<RawMaterialUnitChangeBlockedException>()),
+        );
+
+        final unchanged = (await db.query(
+          'raw_materials',
+          columns: ['name', 'code', 'unitId'],
+          where: 'id = ?',
+          whereArgs: [material.id],
+        )).single;
+        expect(unchanged, {
+          'name': material.name,
+          'code': material.code,
+          'unitId': material.unitId,
+        });
+
+        await dataSource.saveRawMaterial(
+          RawMaterial(
+            id: material.id,
+            name: 'Metadata Updated $status',
+            code: material.code,
+            categoryId: material.categoryId,
+            unitId: material.unitId,
+            createdAt: material.createdAt,
+            updatedAt: now.add(const Duration(minutes: 2)),
+          ),
+        );
+        final metadataUpdated = (await db.query(
+          'raw_materials',
+          columns: ['name', 'unitId'],
+          where: 'id = ?',
+          whereArgs: [material.id],
+        )).single;
+        expect(metadataUpdated, {
+          'name': 'Metadata Updated $status',
+          'unitId': material.unitId,
+        });
+      }
+
+      for (final status in ['COMPLETED', 'CANCELLED']) {
+        final material = await createGuardMaterial(status, now);
+        await addOrderMaterialSnapshot(
+          material: material,
+          key: status,
+          status: status,
+          now: now,
+        );
+        await dataSource.saveRawMaterial(
+          RawMaterial(
+            id: material.id,
+            name: material.name,
+            code: material.code,
+            categoryId: material.categoryId,
+            unitId: 'raw-unit-guard-alternate',
+            createdAt: material.createdAt,
+            updatedAt: now.add(const Duration(minutes: 1)),
+          ),
+        );
+        expect(
+          (await db.query(
+            'raw_materials',
+            columns: ['unitId'],
+            where: 'id = ?',
+            whereArgs: [material.id],
+          )).single['unitId'],
+          'raw-unit-guard-alternate',
+        );
+      }
+    },
+  );
+
+  test('raw material unit guard uses persisted order BOM snapshots', () async {
+    final now = DateTime.now();
+    await prepareRawMaterialUnitGuard(now);
+    final material = await createGuardMaterial('snapshot', now);
+    await addOrderMaterialSnapshot(
+      material: material,
+      key: 'snapshot',
+      status: 'DRAFT',
+      now: now,
+      addCurrentBom: true,
+    );
+    final db = await FurnexaDatabase.instance.database;
+    await db.delete(
+      'product_bom_items',
+      where: 'id = ?',
+      whereArgs: ['raw-unit-guard-current-bom-snapshot'],
+    );
+
+    await expectLater(
+      dataSource.saveRawMaterial(
+        RawMaterial(
+          id: material.id,
+          name: material.name,
+          code: material.code,
+          categoryId: material.categoryId,
+          unitId: 'raw-unit-guard-alternate',
+          createdAt: material.createdAt,
+          updatedAt: now.add(const Duration(minutes: 1)),
+        ),
+      ),
+      throwsA(isA<RawMaterialUnitChangeBlockedException>()),
+    );
+    expect(
+      (await db.query(
+        'raw_materials',
+        columns: ['unitId'],
+        where: 'id = ?',
+        whereArgs: [material.id],
+      )).single['unitId'],
+      'raw-unit-guard-base',
+    );
+  });
+
   test('Feature 2 migration creates tables and version 3', () async {
     expect(
       await FurnexaDatabase.instance.getDatabaseVersion(),
