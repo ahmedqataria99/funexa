@@ -1,4 +1,5 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:furnexa/core/inventory/inventory_identity.dart';
 import 'package:furnexa/core/database/furnexa_database.dart';
 import 'package:furnexa/features/accounting/data/datasources/accounting_local_data_source.dart';
 import 'package:furnexa/features/factory_structure/data/repositories/factory_structure_repository_impl.dart';
@@ -16,6 +17,8 @@ import 'package:furnexa/features/raw_materials_products/domain/entities/item_ent
 import 'package:furnexa/features/sales/data/datasources/sales_local_data_source.dart';
 import 'package:furnexa/features/sales/domain/entities/sales_entities.dart';
 import 'package:furnexa/features/users_roles_permissions/data/datasources/security_local_data_source.dart';
+import 'package:furnexa/features/warehouses_stock/data/datasources/warehouses_stock_local_data_source.dart';
+import 'package:furnexa/features/warehouses_stock/domain/entities/stock_entities.dart';
 
 class DemoSeedSummary {
   const DemoSeedSummary({required this.databasePath, required this.counts});
@@ -99,6 +102,7 @@ class DemoDataSeeder {
     await _seedSuppliersAndPurchases(now);
     await _seedProduction(now);
     await _seedCustomersAndSales(now);
+    await _seedHistoricalSales();
     await _seedAccounting(now);
     await _writeManifest('DEMO_FURNEXA_V1', 'complete');
 
@@ -1224,6 +1228,200 @@ class DemoDataSeeder {
         reference: 'DEMO-EXPENSE-001',
       );
     }
+  }
+
+  Future<void> _seedHistoricalSales() async {
+    const manifestKey = 'DEMO_HISTORICAL_SALES_V1';
+    if (await _manifestValue(manifestKey) == 'complete') return;
+
+    final db = await _db;
+    final endNow = DateTime.now().toUtc();
+    final periodEnd = DateTime.utc(endNow.year, endNow.month, endNow.day);
+    final periodStart = periodEnd.subtract(const Duration(days: 364));
+    final identities =
+        <
+          ({
+            String productId,
+            String? variantId,
+            String unitId,
+            String identityKind,
+            double unitPrice,
+            int phase,
+          })
+        >[
+          (
+            productId: sofaId,
+            variantId: sofaGrayVariantId,
+            unitId: piecesUnitId,
+            identityKind: 'VARIANT',
+            unitPrice: 32000,
+            phase: 0,
+          ),
+          (
+            productId: sofaId,
+            variantId: sofaSandVariantId,
+            unitId: piecesUnitId,
+            identityKind: 'VARIANT',
+            unitPrice: 34500,
+            phase: 2,
+          ),
+          (
+            productId: tableId,
+            variantId: null,
+            unitId: piecesUnitId,
+            identityKind: 'BASE',
+            unitPrice: 20000,
+            phase: 4,
+          ),
+          (
+            productId: chairId,
+            variantId: null,
+            unitId: piecesUnitId,
+            identityKind: 'BASE',
+            unitPrice: 12500,
+            phase: 6,
+          ),
+        ];
+    final dailyQuantities = <List<double>>[
+      for (final identity in identities)
+        List<double>.generate(
+          365,
+          (day) => (4 + ((day * 3 + identity.phase) % 9)).toDouble(),
+        ),
+    ];
+    final orderItems = <SalesItem>[];
+    var subtotal = 0.0;
+    final stock = WarehousesStockLocalDataSource();
+    for (var index = 0; index < identities.length; index++) {
+      final identity = identities[index];
+      final totalQuantity = dailyQuantities[index].fold<double>(
+        0,
+        (sum, quantity) => sum + quantity,
+      );
+      final productRows = await db.query(
+        'products',
+        columns: ['name', 'code'],
+        where: 'id = ?',
+        whereArgs: [identity.productId],
+        limit: 1,
+      );
+      if (productRows.isEmpty) {
+        throw StateError('Synthetic sales product is missing.');
+      }
+      final product = productRows.single;
+      final itemId = 'DEMO-HISTORY-ITEM-${index + 1}';
+      final identityKind = identity.identityKind == 'VARIANT'
+          ? InventoryIdentityKind.variant
+          : InventoryIdentityKind.base;
+      orderItems.add(
+        SalesItem(
+          id: itemId,
+          itemId: identity.productId,
+          itemType: SalesItemType.product,
+          quantity: totalQuantity,
+          unitId: identity.unitId,
+          variantId: identity.variantId,
+          baseUnitId: identity.unitId,
+          baseQuantity: totalQuantity,
+          inventoryIdentityKind: identity.identityKind,
+          identitySnapshotStatus: 'VERIFIED',
+          unitPrice: identity.unitPrice,
+          lineTotal: totalQuantity * identity.unitPrice,
+        ),
+      );
+      subtotal += totalQuantity * identity.unitPrice;
+      await stock.stockIn(
+        warehouseId: finishedWarehouseId,
+        item: StockItemOption(
+          id: identity.productId,
+          name: product['name'] as String,
+          code: product['code'] as String,
+          unitId: identity.unitId,
+          type: StockItemType.product,
+          active: true,
+          productId: identity.productId,
+          variantId: identity.variantId,
+          identityKind: identityKind,
+        ),
+        quantity: totalQuantity + 100,
+        date: periodStart.subtract(const Duration(days: 1)),
+        reference: 'DEMO-HISTORY-STOCK-${index + 1}',
+        notes: 'DEMO: synthetic forecasting history opening stock',
+        operationId: 'DEMO-HISTORY-STOCK-${index + 1}',
+      );
+    }
+
+    const orderId = 'DEMO-HISTORICAL-SALES-ORDER';
+    final order = SalesOrder(
+      id: orderId,
+      orderNumber: 'DEMO-HISTORICAL-SALES-001',
+      customerId: customerOneId,
+      orderDate: periodStart,
+      expectedDeliveryDate: periodEnd,
+      status: SalesOrderStatus.confirmed,
+      subtotal: subtotal,
+      discount: 0,
+      tax: 0,
+      grandTotal: subtotal,
+      notes: 'DEMO: synthetic daily demand history',
+      createdAt: periodStart,
+      updatedAt: periodStart,
+      items: orderItems,
+    );
+    final existingOrder = await db.query(
+      'sales_orders',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [orderId],
+      limit: 1,
+    );
+    if (existingOrder.isEmpty) await _sales.saveOrder(order);
+    final persistedOrder = (await _sales.orders()).singleWhere(
+      (value) => value.id == orderId,
+    );
+
+    for (var day = 0; day < 365; day++) {
+      final deliveryDate = periodStart.add(Duration(days: day));
+      final dailyItems = <SalesItem>[
+        for (var index = 0; index < identities.length; index++)
+          SalesItem(
+            id: 'DEMO-HISTORY-ITEM-${index + 1}',
+            itemId: identities[index].productId,
+            itemType: SalesItemType.product,
+            quantity: dailyQuantities[index][day],
+            unitId: identities[index].unitId,
+            variantId: identities[index].variantId,
+            baseUnitId: identities[index].unitId,
+            baseQuantity: dailyQuantities[index][day],
+            inventoryIdentityKind: identities[index].identityKind,
+            identitySnapshotStatus: 'VERIFIED',
+          ),
+      ];
+      final operationId =
+          'DEMO-HISTORY-DELIVERY-${deliveryDate.toIso8601String().substring(0, 10)}';
+      final delivery = await _sales.postDelivery(
+        order: persistedOrder,
+        warehouseId: finishedWarehouseId,
+        deliveryDate: deliveryDate,
+        items: dailyItems,
+        notes: 'DEMO: synthetic daily demand history',
+        operationId: operationId,
+      );
+      await _sales.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.dispatched,
+        dispatchDate: deliveryDate,
+      );
+      await _sales.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.inTransit,
+      );
+      await _sales.updateDeliveryDispatch(
+        deliveryId: delivery.id,
+        status: DeliveryDispatchStatus.delivered,
+      );
+    }
+    await _writeManifest(manifestKey, 'complete');
   }
 
   Future<bool> _exists(String table, String id) async =>

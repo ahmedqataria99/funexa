@@ -158,6 +158,23 @@ void main() {
   );
 
   testWidgets(
+    'Purchase Returns content supports vertical wheel-style scrolling',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(900, 500));
+      await tester.pumpWidget(app(const Locale('en')));
+      await tester.pumpAndSettle();
+      final scrollable = find.byType(SingleChildScrollView).first;
+      expect(scrollable, findsOneWidget);
+      final view = tester.widget<SingleChildScrollView>(scrollable);
+      expect(view.controller, isNotNull);
+      await tester.drag(scrollable, const Offset(0, -350));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(view.controller!.position.pixels, greaterThan(0));
+      await tester.binding.setSurfaceSize(null);
+    },
+  );
+
+  testWidgets(
     'Purchase Returns list has localized empty state and create action',
     (tester) async {
       await tester.pumpWidget(app(const Locale('en')));

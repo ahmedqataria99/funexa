@@ -196,6 +196,24 @@ void main() {
     );
   }
 
+  testWidgets('Sales Returns content supports vertical wheel-style scrolling', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(900, 500));
+    await tester.pumpWidget(
+      _app(SalesReturnsPage(security: security, dataSource: dataSource)),
+    );
+    await _pumpUntil(tester, find.text('Sales Returns'));
+    final scrollable = find.byType(SingleChildScrollView).first;
+    expect(scrollable, findsOneWidget);
+    final view = tester.widget<SingleChildScrollView>(scrollable);
+    expect(view.controller, isNotNull);
+    await tester.drag(scrollable, const Offset(0, -350));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(view.controller!.position.pixels, greaterThan(0));
+    await tester.binding.setSurfaceSize(null);
+  });
+
   testWidgets('empty state and create action reflect persisted access', (
     tester,
   ) async {

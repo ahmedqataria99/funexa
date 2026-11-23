@@ -69,6 +69,8 @@ class AppLocalizations {
 
   String get globalSearch =>
       locale.languageCode == 'ar' ? 'البحث العام' : 'Global search';
+  String get demandIntelligence =>
+      locale.languageCode == 'ar' ? 'ذكاء الطلب' : 'Demand Intelligence';
   String get globalSearchHint => locale.languageCode == 'ar'
       ? 'ابحث عن منتج، عميل، مورد، أمر بيع...'
       : 'Search for a product, customer, supplier, sales order...';

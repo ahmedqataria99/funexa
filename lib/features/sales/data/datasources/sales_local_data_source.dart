@@ -891,12 +891,25 @@ class SalesLocalDataSource {
 
   Future<List<SalesDelivery>> deliveries(String orderId) async {
     _security.require('SALES_VIEW');
-    final rows = await (await _db).query(
-      'sales_deliveries',
-      where: 'salesOrderId = ?',
-      whereArgs: [orderId],
-      orderBy: 'deliveryDate DESC',
-    );
+    final warehouseIds = _security.authorizedWarehouseIds.toList()..sort();
+    if (!_security.hasUnrestrictedWarehouseAccess && warehouseIds.isEmpty) {
+      return [];
+    }
+    final whereArgs = <Object?>[orderId];
+    final warehousePredicate = _security.hasUnrestrictedWarehouseAccess
+        ? '1 = 1'
+        : 'deliveryWarehouse.id IN (${List.filled(warehouseIds.length, '?').join(', ')})';
+    if (!_security.hasUnrestrictedWarehouseAccess) {
+      whereArgs.addAll(warehouseIds);
+    }
+    final rows = await (await _db).rawQuery('''
+      SELECT sd.*
+      FROM sales_deliveries sd
+      JOIN warehouses deliveryWarehouse ON deliveryWarehouse.id = sd.warehouseId
+      JOIN factories deliveryFactory ON deliveryFactory.id = deliveryWarehouse.factoryId
+      WHERE sd.salesOrderId = ? AND $warehousePredicate
+      ORDER BY sd.deliveryDate DESC
+      ''', whereArgs);
     return rows.map(SalesDelivery.fromMap).toList();
   }
 
@@ -1529,12 +1542,25 @@ class SalesLocalDataSource {
 
   Future<List<Warehouse>> activeWarehouses() async {
     _security.require('SALES_VIEW');
-    return (await (await _db).query(
-      'warehouses',
-      where: 'state = ? AND purpose = ?',
-      whereArgs: ['active', WarehousePurpose.sellable.value],
-      orderBy: 'name ASC',
-    )).map(Warehouse.fromMap).toList();
+    final warehouseIds = _security.authorizedWarehouseIds.toList()..sort();
+    if (!_security.hasUnrestrictedWarehouseAccess && warehouseIds.isEmpty) {
+      return [];
+    }
+    final whereArgs = <Object?>['active', WarehousePurpose.sellable.value];
+    final warehousePredicate = _security.hasUnrestrictedWarehouseAccess
+        ? '1 = 1'
+        : 'w.id IN (${List.filled(warehouseIds.length, '?').join(', ')})';
+    if (!_security.hasUnrestrictedWarehouseAccess) {
+      whereArgs.addAll(warehouseIds);
+    }
+    final rows = await (await _db).rawQuery('''
+      SELECT w.*
+      FROM warehouses w
+      JOIN factories f ON f.id = w.factoryId
+      WHERE w.state = ? AND w.purpose = ? AND $warehousePredicate
+      ORDER BY w.name ASC
+      ''', whereArgs);
+    return rows.map(Warehouse.fromMap).toList();
   }
 
   Future<List<StockItemOption>> activeItems() async {
@@ -1967,6 +1993,7 @@ class SalesLocalDataSource {
   }
 
   Future<void> _validateWarehouse(DatabaseExecutor db, String id) async {
+    await _security.requireResourceScope(ScopeType.warehouse, id);
     if ((await db.query(
       'warehouses',
       columns: ['id'],

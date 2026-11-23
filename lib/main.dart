@@ -39,6 +39,9 @@ import 'package:furnexa/features/users_roles_permissions/presentation/pages/user
 import 'package:furnexa/features/warehouses_stock/presentation/pages/warehouses_stock_page.dart';
 import 'package:furnexa/features/warehouses_stock/data/repositories/warehouses_stock_repository_impl.dart';
 import 'package:furnexa/features/purchasing/data/repositories/purchasing_repository_impl.dart';
+import 'package:furnexa/features/ai/data/local_ai_process_bridge.dart';
+import 'package:furnexa/features/ai/data/local_ai_runtime.dart';
+import 'package:furnexa/features/ai/presentation/pages/demand_intelligence_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -85,6 +88,21 @@ Future<void> main() async {
       preferences: preferences,
     ),
   );
+  unawaited(_startLocalAiRuntime());
+}
+
+Future<void> _startLocalAiRuntime() async {
+  try {
+    await LocalAiRuntime.start(FurnexaApp.aiBridge);
+  } on Object catch (error, stackTrace) {
+    if (FurnexaDatabaseDiagnostics.enabled) {
+      await FurnexaDatabaseDiagnostics.reportFailure(
+        source: 'app.localAi.startup',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
 }
 
 class FurnexaApp extends StatefulWidget {
@@ -100,12 +118,33 @@ class FurnexaApp extends StatefulWidget {
   final SharedPreferences? preferences;
 
   static final SecurityLocalDataSource security = SecurityLocalDataSource();
+  static final LocalAiProcessBridge aiBridge = LocalAiProcessBridge();
 
   @override
   State<FurnexaApp> createState() => _FurnexaAppState();
 }
 
-class _FurnexaAppState extends State<FurnexaApp> {
+class _FurnexaAppState extends State<FurnexaApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(FurnexaApp.aiBridge.stop());
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      unawaited(FurnexaApp.aiBridge.stop());
+    }
+  }
+
   late ThemeMode _themeMode = widget.initialThemeMode;
   late Locale _locale = widget.initialLocale;
 
@@ -272,34 +311,37 @@ class _AppHomeState extends State<_AppHome> {
   }
 
   void _openSearchResult(GlobalSearchResultItem item) {
+    final aiOffset = widget.security.can('SALES_VIEW') ? 1 : 0;
     setState(() {
       _selectedSearchResult = item;
       _index = switch (item.entityType) {
-        GlobalSearchEntityType.product => 2,
+        GlobalSearchEntityType.product => 2 + aiOffset,
         GlobalSearchEntityType.customer ||
-        GlobalSearchEntityType.salesOrder => 5,
+        GlobalSearchEntityType.salesOrder => 5 + aiOffset,
         GlobalSearchEntityType.productionOrder ||
         GlobalSearchEntityType.productionStage =>
-          widget.security.can('PRODUCTION_VIEW') ? 6 : _index,
-        GlobalSearchEntityType.worker => 7,
-        GlobalSearchEntityType.warehouse => 3,
-        GlobalSearchEntityType.section || GlobalSearchEntityType.workshop => 1,
+          widget.security.can('PRODUCTION_VIEW') ? 6 + aiOffset : _index,
+        GlobalSearchEntityType.worker => 7 + aiOffset,
+        GlobalSearchEntityType.warehouse => 3 + aiOffset,
+        GlobalSearchEntityType.section ||
+        GlobalSearchEntityType.workshop => 1 + aiOffset,
       };
     });
   }
 
   void _openSearchCategory(GlobalSearchEntityCategory category) {
+    final aiOffset = widget.security.can('SALES_VIEW') ? 1 : 0;
     final index = switch (category) {
-      GlobalSearchEntityCategory.products => 2,
+      GlobalSearchEntityCategory.products => 2 + aiOffset,
       GlobalSearchEntityCategory.customers ||
-      GlobalSearchEntityCategory.salesOrders => 5,
+      GlobalSearchEntityCategory.salesOrders => 5 + aiOffset,
       GlobalSearchEntityCategory.productionOrders =>
-        widget.security.can('PRODUCTION_VIEW') ? 6 : _index,
-      GlobalSearchEntityCategory.workers => 7,
-      GlobalSearchEntityCategory.warehouses => 3,
+        widget.security.can('PRODUCTION_VIEW') ? 6 + aiOffset : _index,
+      GlobalSearchEntityCategory.workers => 7 + aiOffset,
+      GlobalSearchEntityCategory.warehouses => 3 + aiOffset,
       GlobalSearchEntityCategory.sections ||
       GlobalSearchEntityCategory.workshops ||
-      GlobalSearchEntityCategory.stages => 1,
+      GlobalSearchEntityCategory.stages => 1 + aiOffset,
       _ => 0,
     };
     setState(() => _index = index);
@@ -309,11 +351,26 @@ class _AppHomeState extends State<_AppHome> {
   Widget build(BuildContext context) {
     final localizations = AppLocalizations.of(context);
     final canViewProduction = widget.security.can('PRODUCTION_VIEW');
+    final canViewDemandIntelligence = widget.security.can('SALES_VIEW');
+    final aiOffset = canViewDemandIntelligence ? 1 : 0;
+    final factoryIndex = 1 + aiOffset;
+    final productsIndex = factoryIndex + 1;
+    final warehouseIndex = productsIndex + 1;
+    final purchasingIndex = warehouseIndex + 1;
+    final salesIndex = purchasingIndex + 1;
+    final productionIndex = salesIndex + 1;
+    final hrIndex = canViewProduction ? productionIndex + 1 : salesIndex + 1;
+    final accountingIndex = hrIndex + 1;
     final pages = [
       DashboardReportsPage(
         security: widget.security,
         onNavigate: (value) => setState(() => _index = value),
       ),
+      if (canViewDemandIntelligence)
+        DemandIntelligencePage(
+          security: widget.security,
+          bridge: FurnexaApp.aiBridge,
+        ),
       FactoryStructurePage(
         security: widget.security,
         initialSelectedId:
@@ -377,12 +434,12 @@ class _AppHomeState extends State<_AppHome> {
         security: widget.security,
         onNavigate: (action) => setState(
           () => _index = switch (action) {
-            'warehouse_stock' => 3,
-            'purchasing' => 4,
-            'sales' => 5,
-            'production' => canViewProduction ? 6 : _index,
-            'hr' => 7,
-            'accounting' => 8,
+            'warehouse_stock' => warehouseIndex,
+            'purchasing' => purchasingIndex,
+            'sales' => salesIndex,
+            'production' => canViewProduction ? productionIndex : _index,
+            'hr' => hrIndex,
+            'accounting' => accountingIndex,
             _ => _index,
           },
         ),
@@ -403,6 +460,12 @@ class _AppHomeState extends State<_AppHome> {
         icon: Icons.dashboard_outlined,
         selectedIcon: Icons.dashboard,
       ),
+      if (canViewDemandIntelligence)
+        FurnexaNavItem(
+          label: localizations.demandIntelligence,
+          icon: Icons.auto_graph_outlined,
+          selectedIcon: Icons.auto_graph,
+        ),
       FurnexaNavItem(
         label: localizations.factoryStructure,
         icon: Icons.factory_outlined,
@@ -477,24 +540,31 @@ class _AppHomeState extends State<_AppHome> {
         ),
     ];
 
-    final navigationPageIndexes = [
+    final usersIndex = accountingIndex + 1;
+    final notificationsIndex = usersIndex + 1;
+    final documentsIndex = notificationsIndex + 1;
+    final backupIndex = documentsIndex + 1;
+    final salesReturnsIndex = backupIndex + 1;
+    final purchaseReturnsIndex = salesReturnsIndex + 1;
+    final navigationPageIndexes = <int>[
       0,
-      1,
-      2,
-      3,
-      4,
-      5,
-      if (canViewProduction) 6,
-      7,
-      8,
-      9,
-      10,
-      11,
-      12,
-      13,
-      if (widget.security.can('RETURNS_VIEW')) 14,
+      if (canViewDemandIntelligence) 1,
+      factoryIndex,
+      productsIndex,
+      warehouseIndex,
+      purchasingIndex,
+      salesIndex,
+      if (canViewProduction) productionIndex,
+      hrIndex,
+      accountingIndex,
+      usersIndex,
+      notificationsIndex,
+      documentsIndex,
+      backupIndex,
+      salesReturnsIndex,
+      if (widget.security.can('RETURNS_VIEW')) purchaseReturnsIndex,
     ];
-    final pageIndex = !canViewProduction && _index == 6 ? 0 : _index;
+    final pageIndex = _index;
     final requestedNavigationIndex = navigationPageIndexes.indexOf(pageIndex);
     final selectedNavigationIndex = requestedNavigationIndex < 0
         ? 0

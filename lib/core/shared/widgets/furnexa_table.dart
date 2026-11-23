@@ -47,6 +47,7 @@ class FurnexaDataTable extends StatefulWidget {
     super.key,
     required this.columns,
     required this.rows,
+    this.verticalScrollable = true,
     this.diagnosticFeature,
     this.diagnosticPageStateCount,
     this.rowId,
@@ -86,6 +87,7 @@ class FurnexaDataTable extends StatefulWidget {
   final String? emptyActionLabel;
   final VoidCallback? onEmptyAction;
   final FurnexaTablePagination? pagination;
+  final bool verticalScrollable;
 
   @override
   State<FurnexaDataTable> createState() => _FurnexaDataTableState();
@@ -202,64 +204,68 @@ class _FurnexaDataTableState extends State<FurnexaDataTable> {
       reason: 'DataRow widgets generated from received table rows',
       renderedRowCount: dataRows.length,
     );
-    return Column(
-      children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 160, maxHeight: 560),
-          child: Scrollbar(
-            controller: _verticalController,
-            thumbVisibility: true,
-            child: SingleChildScrollView(
-              controller: _verticalController,
-              child: Scrollbar(
-                controller: _horizontalController,
-                thumbVisibility: true,
-                notificationPredicate: (notification) =>
-                    notification.depth == 0,
-                child: SingleChildScrollView(
-                  controller: _horizontalController,
-                  scrollDirection: Axis.horizontal,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 680),
-                    child: DataTable(
-                      showCheckboxColumn: hasSelection,
-                      onSelectAll: hasSelection ? _toggleAll : null,
-                      headingRowColor: WidgetStatePropertyAll(
-                        Theme.of(context).colorScheme.surfaceContainerHighest,
-                      ),
-                      dataRowMinHeight: 56,
-                      dataRowMaxHeight: 72,
-                      sortColumnIndex: widget.sortKey == null
-                          ? null
-                          : widget.columns.indexWhere(
-                              (column) => column.key == widget.sortKey,
-                            ),
-                      sortAscending: widget.sortAscending,
-                      columns: [
-                        ...widget.columns.map(
-                          (column) => DataColumn(
-                            label: Align(
-                              alignment: column.alignment,
-                              child: Text(column.label),
-                            ),
-                            onSort: column.sortable && widget.onSort != null
-                                ? (_, ascending) {
-                                    widget.onSort!(column.key);
-                                  }
-                                : null,
-                          ),
-                        ),
-                        if (hasActions)
-                          DataColumn(label: Text(localizations.actions)),
-                      ],
-                      rows: dataRows,
-                    ),
+    Widget table = Scrollbar(
+      controller: _horizontalController,
+      thumbVisibility: true,
+      notificationPredicate: (notification) => notification.depth == 0,
+      child: SingleChildScrollView(
+        controller: _horizontalController,
+        scrollDirection: Axis.horizontal,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 680),
+          child: DataTable(
+            showCheckboxColumn: hasSelection,
+            onSelectAll: hasSelection ? _toggleAll : null,
+            headingRowColor: WidgetStatePropertyAll(
+              Theme.of(context).colorScheme.surfaceContainerHighest,
+            ),
+            dataRowMinHeight: 56,
+            dataRowMaxHeight: 72,
+            sortColumnIndex: widget.sortKey == null
+                ? null
+                : widget.columns.indexWhere(
+                    (column) => column.key == widget.sortKey,
                   ),
+            sortAscending: widget.sortAscending,
+            columns: [
+              ...widget.columns.map(
+                (column) => DataColumn(
+                  label: Align(
+                    alignment: column.alignment,
+                    child: Text(column.label),
+                  ),
+                  onSort: column.sortable && widget.onSort != null
+                      ? (_, ascending) {
+                          widget.onSort!(column.key);
+                        }
+                      : null,
                 ),
               ),
-            ),
+              if (hasActions) DataColumn(label: Text(localizations.actions)),
+            ],
+            rows: dataRows,
           ),
         ),
+      ),
+    );
+
+    if (widget.verticalScrollable) {
+      table = ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 160, maxHeight: 560),
+        child: Scrollbar(
+          controller: _verticalController,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: _verticalController,
+            child: table,
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        table,
         if (widget.pagination != null)
           _PaginationFooter(config: widget.pagination!),
       ],

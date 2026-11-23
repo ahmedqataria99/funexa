@@ -37,6 +37,16 @@ class SecurityLocalDataSource {
 
   SecuritySession? get session => _activeSession;
 
+  bool get hasUnrestrictedWarehouseAccess =>
+      _activeSession?.isSystemAdmin ?? false;
+
+  Set<String> get authorizedWarehouseIds =>
+      _activeSession?.scopes
+          .where((scope) => scope.type == ScopeType.warehouse)
+          .map((scope) => scope.scopeId)
+          .toSet() ??
+      const <String>{};
+
   Future<Database> get _db async => FurnexaDatabase.instance.database;
 
   Future<void> ensureInitialAdmin() async {

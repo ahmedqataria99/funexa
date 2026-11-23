@@ -24,6 +24,7 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
   late final ReturnsQualityLocalDataSource _dataSource =
       widget.dataSource ?? ReturnsQualityLocalDataSource(null, widget.security);
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _pageScrollController = ScrollController();
   List<SalesReturnWorkflowDetails> _returns = [];
   bool _loading = true;
   String? _error;
@@ -44,6 +45,7 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _pageScrollController.dispose();
     super.dispose();
   }
 
@@ -165,6 +167,8 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
+          controller: _pageScrollController,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           child: Padding(
             padding: const EdgeInsets.all(AppSpacing.lg),
             child: Column(
@@ -288,9 +292,8 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
                       ),
                   ],
                 ),
-                SizedBox(
-                  height: 420,
-                  child: FurnexaDataTable(
+                FurnexaDataTable(
+                    verticalScrollable: false,
                     columns: [
                       FurnexaTableColumn(
                         key: 'returnNumber',
@@ -355,7 +358,6 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
                       }),
                     ),
                   ),
-                ),
               ],
             ),
           ),

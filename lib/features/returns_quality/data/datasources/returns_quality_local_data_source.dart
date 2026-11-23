@@ -25,27 +25,79 @@ class ReturnsQualityLocalDataSource {
 
   Future<Database> get _db async => FurnexaDatabase.instance.database;
 
+  String _warehousePredicate(String warehouseExpression, List<Object?> args) {
+    if (_security.hasUnrestrictedWarehouseAccess) return '1 = 1';
+    final warehouseIds = _security.authorizedWarehouseIds.toList()..sort();
+    if (warehouseIds.isEmpty) return '0 = 1';
+    args.addAll(warehouseIds);
+    return '$warehouseExpression IN (${List.filled(warehouseIds.length, '?').join(', ')})';
+  }
+
+  String _salesReturnItemScopePredicate(
+    String itemIdExpression,
+    List<Object?> args,
+  ) {
+    final sourceScope = _warehousePredicate('sourceWarehouse.id', args);
+    return '''(
+      $itemIdExpression IS NULL OR EXISTS (
+        SELECT 1
+        FROM sales_return_items returnItem
+        WHERE returnItem.id = $itemIdExpression
+          AND returnItem.salesReturnId = sr.id
+          AND (
+            returnItem.sourceDeliveryItemId IS NULL OR EXISTS (
+              SELECT 1
+              FROM sales_delivery_items sourceItem
+              JOIN sales_deliveries sourceDelivery
+                ON sourceDelivery.id = sourceItem.salesDeliveryId
+              JOIN warehouses sourceWarehouse
+                ON sourceWarehouse.id = sourceDelivery.warehouseId
+              JOIN factories sourceFactory
+                ON sourceFactory.id = sourceWarehouse.factoryId
+              WHERE sourceItem.id = returnItem.sourceDeliveryItemId
+                AND sourceDelivery.salesOrderId = sr.salesOrderId
+                AND sourceDelivery.warehouseId = sr.warehouseId
+                AND (sr.salesDeliveryId IS NULL OR sr.salesDeliveryId = sourceDelivery.id)
+                AND $sourceScope
+            )
+          )
+      )
+    )''';
+  }
+
   Future<List<SalesReturn>> salesReturns({String? customerId}) async {
     _security.require('RETURNS_VIEW');
     final db = await _db;
-    final rows = await db.query(
-      'sales_returns',
-      where: customerId == null ? null : 'customerId = ?',
-      whereArgs: customerId == null ? null : [customerId],
-      orderBy: 'returnDate DESC',
-    );
-    final session = _security.session;
-    return rows
-        .where(
-          (row) =>
-              session == null ||
-              session.canAccess(
-                ScopeType.warehouse,
-                row['warehouseId'] as String,
-              ),
+    final whereArgs = <Object?>[];
+    final clauses = <String>[
+      _warehousePredicate('returnWarehouse.id', whereArgs),
+      '''(
+        sr.salesDeliveryId IS NULL OR EXISTS (
+          SELECT 1
+          FROM sales_deliveries sourceDelivery
+          JOIN warehouses sourceWarehouse
+            ON sourceWarehouse.id = sourceDelivery.warehouseId
+          JOIN factories sourceFactory
+            ON sourceFactory.id = sourceWarehouse.factoryId
+          WHERE sourceDelivery.id = sr.salesDeliveryId
+            AND sourceDelivery.salesOrderId = sr.salesOrderId
+            AND sourceDelivery.warehouseId = sr.warehouseId
         )
-        .map(SalesReturn.fromMap)
-        .toList();
+      )''',
+    ];
+    if (customerId != null) {
+      clauses.add('sr.customerId = ?');
+      whereArgs.add(customerId);
+    }
+    final rows = await db.rawQuery('''
+      SELECT sr.*
+      FROM sales_returns sr
+      JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+      JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY sr.returnDate DESC
+      ''', whereArgs);
+    return rows.map(SalesReturn.fromMap).toList();
   }
 
   Future<List<SalesReturnSourceDelivery>> salesReturnSourceDeliveries({
@@ -53,32 +105,39 @@ class ReturnsQualityLocalDataSource {
   }) async {
     _security.require('RETURNS_VIEW');
     final normalized = query.trim().toLowerCase();
+    final warehouseArgs = <Object?>[];
+    final warehousePredicate = _warehousePredicate(
+      'deliveryWarehouse.id',
+      warehouseArgs,
+    );
     final rows = await (await _db).rawQuery(
       '''
       SELECT sd.id, sd.deliveryNumber, sd.salesOrderId, sd.warehouseId,
         so.orderNumber AS salesOrderNumber, so.customerId,
         c.name AS customerName, sd.deliveryDate
       FROM sales_deliveries sd
+      JOIN warehouses deliveryWarehouse
+        ON deliveryWarehouse.id = sd.warehouseId
+      JOIN factories deliveryFactory
+        ON deliveryFactory.id = deliveryWarehouse.factoryId
       JOIN sales_orders so ON so.id = sd.salesOrderId
       JOIN customers c ON c.id = so.customerId
       WHERE sd.status = 'DELIVERED'
+        AND $warehousePredicate
         AND (? = '' OR LOWER(sd.deliveryNumber) LIKE ?
           OR LOWER(so.orderNumber) LIKE ? OR LOWER(c.name) LIKE ?)
       ORDER BY sd.deliveryDate DESC
       LIMIT 100
       ''',
-      [normalized, '%$normalized%', '%$normalized%', '%$normalized%'],
+      [
+        ...warehouseArgs,
+        normalized,
+        '%$normalized%',
+        '%$normalized%',
+        '%$normalized%',
+      ],
     );
-    final session = _security.session;
     return rows
-        .where(
-          (row) =>
-              session == null ||
-              session.canAccess(
-                ScopeType.warehouse,
-                row['warehouseId'] as String,
-              ),
-        )
         .map(
           (row) => SalesReturnSourceDelivery(
             id: row['id'] as String,
@@ -101,17 +160,29 @@ class ReturnsQualityLocalDataSource {
   ) async {
     _security.require('RETURNS_VIEW');
     final db = await _db;
-    final deliveryRows = await db.query(
-      'sales_deliveries',
-      columns: ['warehouseId'],
-      where: 'id = ? AND status = ?',
-      whereArgs: [deliveryId, 'DELIVERED'],
-      limit: 1,
+    final deliveryScopeArgs = <Object?>[deliveryId, 'DELIVERED'];
+    final deliveryScope = _warehousePredicate(
+      'deliveryWarehouse.id',
+      deliveryScopeArgs,
     );
+    final deliveryRows = await db.rawQuery('''
+      SELECT sd.id
+      FROM sales_deliveries sd
+      JOIN warehouses deliveryWarehouse ON deliveryWarehouse.id = sd.warehouseId
+      JOIN factories deliveryFactory ON deliveryFactory.id = deliveryWarehouse.factoryId
+      WHERE sd.id = ? AND sd.status = ? AND $deliveryScope
+      LIMIT 1
+      ''', deliveryScopeArgs);
     if (deliveryRows.isEmpty) throw Exception('التسليم غير موجود أو غير مكتمل');
-    await _security.requireResourceScope(
-      ScopeType.warehouse,
-      deliveryRows.single['warehouseId'] as String,
+    final sourceScopeArgs = <Object?>[deliveryId];
+    final sourceScope = _warehousePredicate(
+      'deliveryWarehouse.id',
+      sourceScopeArgs,
+    );
+    final returnedScopeArgs = <Object?>[];
+    final returnedScope = _warehousePredicate(
+      'returnWarehouse.id',
+      returnedScopeArgs,
     );
     final rows = await db.rawQuery(
       '''
@@ -126,8 +197,20 @@ class ReturnsQualityLocalDataSource {
           SELECT SUM(sri.baseQuantity)
           FROM sales_return_items sri
           JOIN sales_returns sr ON sr.id = sri.salesReturnId
+          JOIN warehouses returnWarehouse
+            ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory
+            ON returnFactory.id = returnWarehouse.factoryId
+          JOIN sales_delivery_items sourceItem
+            ON sourceItem.id = sri.sourceDeliveryItemId
+          JOIN sales_deliveries sourceDelivery
+            ON sourceDelivery.id = sourceItem.salesDeliveryId
           WHERE sri.sourceDeliveryItemId = di.id
             AND sr.status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED')
+            AND sr.salesOrderId = sourceDelivery.salesOrderId
+            AND sr.warehouseId = sourceDelivery.warehouseId
+            AND (sr.salesDeliveryId IS NULL OR sr.salesDeliveryId = sourceDelivery.id)
+            AND $returnedScope
         ), 0) AS previouslyReturnedBaseQuantity,
         di.unitId, u.name AS unitName,
         COALESCE(di.baseUnitId, di.unitId) AS baseUnitId,
@@ -138,6 +221,9 @@ class ReturnsQualityLocalDataSource {
         COALESCE(di.identitySnapshotStatus, 'UNVERIFIED')
           AS identitySnapshotStatus
       FROM sales_delivery_items di
+      JOIN sales_deliveries sd ON sd.id = di.salesDeliveryId
+      JOIN warehouses deliveryWarehouse ON deliveryWarehouse.id = sd.warehouseId
+      JOIN factories deliveryFactory ON deliveryFactory.id = deliveryWarehouse.factoryId
       JOIN sales_order_items soi ON soi.id = di.salesOrderItemId
       LEFT JOIN products p ON p.id = COALESCE(soi.productId, soi.itemId)
         AND soi.itemType = 'PRODUCT'
@@ -146,10 +232,10 @@ class ReturnsQualityLocalDataSource {
       LEFT JOIN product_variants v ON v.id = di.variantId
       LEFT JOIN units u ON u.id = di.unitId
       LEFT JOIN units bu ON bu.id = COALESCE(di.baseUnitId, di.unitId)
-      WHERE di.salesDeliveryId = ?
+      WHERE di.salesDeliveryId = ? AND $sourceScope
       ORDER BY di.id ASC
       ''',
-      [deliveryId],
+      [...returnedScopeArgs, deliveryId, ...sourceScopeArgs.skip(1)],
     );
     return rows.map((row) {
       final itemId = row['itemId'] as String;
@@ -181,62 +267,143 @@ class ReturnsQualityLocalDataSource {
     WarehousePurpose purpose,
   ) async {
     _security.require('RETURNS_EDIT');
-    final rows = await (await _db).query(
-      'warehouses',
-      where: 'state = ? AND purpose = ?',
-      whereArgs: ['active', purpose.value],
-      orderBy: 'name ASC',
-    );
-    final session = _security.session;
-    return rows
-        .where(
-          (row) =>
-              session == null ||
-              session.canAccess(ScopeType.warehouse, row['id'] as String),
-        )
-        .map(Warehouse.fromMap)
-        .toList();
+    final whereArgs = <Object?>['active', purpose.value];
+    final warehousePredicate = _warehousePredicate('w.id', whereArgs);
+    final rows = await (await _db).rawQuery('''
+      SELECT w.*
+      FROM warehouses w
+      JOIN factories f ON f.id = w.factoryId
+      WHERE w.state = ? AND w.purpose = ? AND $warehousePredicate
+      ORDER BY w.name ASC
+      ''', whereArgs);
+    return rows.map(Warehouse.fromMap).toList();
   }
 
   Future<SalesReturnWorkflowDetails> salesReturnDetails(String returnId) async {
     _security.require('RETURNS_VIEW');
     final db = await _db;
-    final returnRows = await db.query(
-      'sales_returns',
-      where: 'id = ?',
-      whereArgs: [returnId],
-      limit: 1,
+    final returnScopeArgs = <Object?>[returnId];
+    final returnScope = _warehousePredicate(
+      'returnWarehouse.id',
+      returnScopeArgs,
     );
+    final returnRows = await db.rawQuery('''
+      SELECT sr.*
+      FROM sales_returns sr
+      JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+      JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+      WHERE sr.id = ? AND $returnScope
+        AND (
+          sr.salesDeliveryId IS NULL OR EXISTS (
+            SELECT 1
+            FROM sales_deliveries sourceDelivery
+            JOIN warehouses sourceWarehouse
+              ON sourceWarehouse.id = sourceDelivery.warehouseId
+            JOIN factories sourceFactory
+              ON sourceFactory.id = sourceWarehouse.factoryId
+            WHERE sourceDelivery.id = sr.salesDeliveryId
+              AND sourceDelivery.salesOrderId = sr.salesOrderId
+              AND sourceDelivery.warehouseId = sr.warehouseId
+          )
+        )
+      LIMIT 1
+      ''', returnScopeArgs);
     if (returnRows.isEmpty) throw Exception('مرتجع المبيعات غير موجود');
     final row = returnRows.single;
-    await _security.requireResourceScope(
-      ScopeType.warehouse,
-      row['warehouseId'] as String,
+    final itemArgs = <Object?>[returnId];
+    final itemReturnScope = _warehousePredicate('returnWarehouse.id', itemArgs);
+    final itemSourceScopeArgs = <Object?>[];
+    final itemSourceScope = _warehousePredicate(
+      'sourceWarehouse.id',
+      itemSourceScopeArgs,
     );
-    final itemRows = await db.query(
-      'sales_return_items',
-      where: 'salesReturnId = ?',
-      whereArgs: [returnId],
-      orderBy: 'createdAt ASC, id ASC',
+    final itemRows = await db.rawQuery(
+      '''
+      SELECT sri.*
+      FROM sales_return_items sri
+      JOIN sales_returns sr ON sr.id = sri.salesReturnId
+      JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+      JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+      WHERE sri.salesReturnId = ? AND $itemReturnScope
+        AND (
+          sri.sourceDeliveryItemId IS NULL OR EXISTS (
+            SELECT 1
+            FROM sales_delivery_items sourceItem
+            JOIN sales_deliveries sourceDelivery
+              ON sourceDelivery.id = sourceItem.salesDeliveryId
+            JOIN warehouses sourceWarehouse
+              ON sourceWarehouse.id = sourceDelivery.warehouseId
+            JOIN factories sourceFactory
+              ON sourceFactory.id = sourceWarehouse.factoryId
+            WHERE sourceItem.id = sri.sourceDeliveryItemId
+              AND sourceDelivery.salesOrderId = sr.salesOrderId
+              AND sourceDelivery.warehouseId = sr.warehouseId
+              AND (sr.salesDeliveryId IS NULL OR sr.salesDeliveryId = sourceDelivery.id)
+              AND $itemSourceScope
+          )
+        )
+      ORDER BY sri.createdAt ASC, sri.id ASC
+      ''',
+      [...itemArgs, ...itemSourceScopeArgs],
     );
     final items = itemRows.map(SalesReturnItem.fromMap).toList();
     final receipts = <SalesReturnReceiptRecord>[];
     final receivedByItem = <String, (double, double)>{};
-    final receiptRows = await db.query(
-      'sales_return_receipts',
-      where: 'salesReturnId = ?',
-      whereArgs: [returnId],
-      orderBy: 'receiptDate ASC',
+    final receiptArgs = <Object?>[returnId];
+    final receiptReturnScope = _warehousePredicate(
+      'returnWarehouse.id',
+      receiptArgs,
+    );
+    final receiptWarehouseScopeArgs = <Object?>[];
+    final receiptWarehouseScope = _warehousePredicate(
+      'receiptWarehouse.id',
+      receiptWarehouseScopeArgs,
+    );
+    final receiptRows = await db.rawQuery(
+      '''
+      SELECT receipt.*
+      FROM sales_return_receipts receipt
+      JOIN sales_returns sr ON sr.id = receipt.salesReturnId
+      JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+      JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+      JOIN warehouses receiptWarehouse ON receiptWarehouse.id = receipt.warehouseId
+      JOIN factories receiptFactory ON receiptFactory.id = receiptWarehouse.factoryId
+      WHERE receipt.salesReturnId = ?
+        AND $receiptReturnScope AND $receiptWarehouseScope
+      ORDER BY receipt.receiptDate ASC
+      ''',
+      [...receiptArgs, ...receiptWarehouseScopeArgs],
     );
     for (final receipt in receiptRows) {
-      await _security.requireResourceScope(
-        ScopeType.warehouse,
-        receipt['warehouseId'] as String,
+      final receiptItemArgs = <Object?>[receipt['id'], returnId];
+      final receiptItemReturnScope = _warehousePredicate(
+        'returnWarehouse.id',
+        receiptItemArgs,
       );
-      final receiptItems = await db.query(
-        'sales_return_receipt_items',
-        where: 'receiptId = ?',
-        whereArgs: [receipt['id']],
+      final receiptItemWarehouseScopeArgs = <Object?>[];
+      final receiptItemWarehouseScope = _warehousePredicate(
+        'receiptWarehouse.id',
+        receiptItemWarehouseScopeArgs,
+      );
+      final receiptItems = await db.rawQuery(
+        '''
+        SELECT receiptItem.*
+        FROM sales_return_receipt_items receiptItem
+        JOIN sales_return_receipts receipt
+          ON receipt.id = receiptItem.receiptId
+        JOIN sales_returns sr ON sr.id = receipt.salesReturnId
+        JOIN sales_return_items returnItem
+          ON returnItem.id = receiptItem.salesReturnItemId
+          AND returnItem.salesReturnId = sr.id
+        JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+        JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+        JOIN warehouses receiptWarehouse ON receiptWarehouse.id = receipt.warehouseId
+        JOIN factories receiptFactory ON receiptFactory.id = receiptWarehouse.factoryId
+        WHERE receiptItem.receiptId = ? AND sr.id = ?
+          AND $receiptItemReturnScope AND $receiptItemWarehouseScope
+        ORDER BY receiptItem.salesReturnItemId ASC
+        ''',
+        [...receiptItemArgs, ...receiptItemWarehouseScopeArgs],
       );
       final mappedReceiptItems = receiptItems.map((receiptItem) {
         final itemId = receiptItem['salesReturnItemId'] as String;
@@ -253,13 +420,15 @@ class ReturnsQualityLocalDataSource {
           baseQuantity: baseQuantity,
         );
       }).toList();
-      final warehouseRows = await db.query(
-        'warehouses',
-        columns: ['name'],
-        where: 'id = ?',
-        whereArgs: [receipt['warehouseId']],
-        limit: 1,
-      );
+      final receiptNameArgs = <Object?>[receipt['warehouseId']];
+      final receiptNameScope = _warehousePredicate('w.id', receiptNameArgs);
+      final warehouseRows = await db.rawQuery('''
+        SELECT w.name
+        FROM warehouses w
+        JOIN factories f ON f.id = w.factoryId
+        WHERE w.id = ? AND $receiptNameScope
+        LIMIT 1
+        ''', receiptNameArgs);
       receipts.add(
         SalesReturnReceiptRecord(
           id: receipt['id'] as String,
@@ -280,18 +449,71 @@ class ReturnsQualityLocalDataSource {
     final canViewQuality =
         _security.can('QUALITY_VIEW') || _security.can('QUALITY_EDIT');
     if (canViewQuality) {
-      final inspectionRows = await db.query(
-        'quality_inspections',
-        where: 'sourceType = ? AND sourceId = ?',
-        whereArgs: ['SALES_RETURN', returnId],
-        limit: 1,
+      final inspectionArgs = <Object?>[returnId];
+      final inspectionScope = _warehousePredicate(
+        'returnWarehouse.id',
+        inspectionArgs,
+      );
+      final inspectionWarehouseScopeArgs = <Object?>[];
+      final inspectionWarehouseScope = _warehousePredicate(
+        'inspection.warehouseId',
+        inspectionWarehouseScopeArgs,
+      );
+      final inspectionRows = await db.rawQuery(
+        '''
+        SELECT inspection.*
+        FROM quality_inspections inspection
+        JOIN sales_returns sr
+          ON sr.id = inspection.sourceId AND inspection.sourceType = 'SALES_RETURN'
+        JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+        JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+        WHERE inspection.sourceType = 'SALES_RETURN'
+          AND inspection.sourceId = ? AND $inspectionScope
+          AND $inspectionWarehouseScope
+        LIMIT 1
+        ''',
+        [...inspectionArgs, ...inspectionWarehouseScopeArgs],
       );
       if (inspectionRows.isNotEmpty) {
-        final inspectionItemRows = await db.query(
-          'quality_inspection_items',
-          where: 'inspectionId = ?',
-          whereArgs: [inspectionRows.single['id']],
-          orderBy: 'createdAt ASC, id ASC',
+        final inspectionItemArgs = <Object?>[
+          inspectionRows.single['id'],
+          returnId,
+        ];
+        final inspectionItemScope = _warehousePredicate(
+          'returnWarehouse.id',
+          inspectionItemArgs,
+        );
+        final inspectionItemWarehouseScopeArgs = <Object?>[];
+        final inspectionItemWarehouseScope = _warehousePredicate(
+          'inspection.warehouseId',
+          inspectionItemWarehouseScopeArgs,
+        );
+        final inspectionItemSourceScopeArgs = <Object?>[];
+        final inspectionItemSourceScope = _salesReturnItemScopePredicate(
+          'inspectionItem.sourceReturnItemId',
+          inspectionItemSourceScopeArgs,
+        );
+        final inspectionItemRows = await db.rawQuery(
+          '''
+          SELECT inspectionItem.*
+          FROM quality_inspection_items inspectionItem
+          JOIN quality_inspections inspection
+            ON inspection.id = inspectionItem.inspectionId
+          JOIN sales_returns sr
+            ON sr.id = inspection.sourceId AND inspection.sourceType = 'SALES_RETURN'
+          JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+          WHERE inspectionItem.inspectionId = ?
+            AND inspection.sourceId = ? AND $inspectionItemScope
+            AND $inspectionItemWarehouseScope
+            AND $inspectionItemSourceScope
+          ORDER BY inspectionItem.createdAt ASC, inspectionItem.id ASC
+          ''',
+          [
+            ...inspectionItemArgs,
+            ...inspectionItemWarehouseScopeArgs,
+            ...inspectionItemSourceScopeArgs,
+          ],
         );
         inspection = QualityInspection.fromMap(
           inspectionRows.single,
@@ -312,21 +534,43 @@ class ReturnsQualityLocalDataSource {
     }
     final lines = <SalesReturnWorkflowLine>[];
     for (final item in items) {
+      final sourceArgs = <Object?>[item.id, returnId];
+      final sourceReturnScope = _warehousePredicate(
+        'returnWarehouse.id',
+        sourceArgs,
+      );
+      final sourceWarehouseScopeArgs = <Object?>[];
+      final sourceWarehouseScope = _warehousePredicate(
+        'sourceWarehouse.id',
+        sourceWarehouseScopeArgs,
+      );
       final sourceRows = await db.rawQuery(
         '''
         SELECT di.deliveredQuantity, u.name AS unitName,
           p.name AS productName, rm.name AS materialName
-        FROM sales_delivery_items di
+        FROM sales_return_items sri
+        JOIN sales_returns sr ON sr.id = sri.salesReturnId
+        JOIN sales_delivery_items di
+          ON di.id = sri.sourceDeliveryItemId
+        JOIN sales_deliveries sd ON sd.id = di.salesDeliveryId
+        JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+        JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+        JOIN warehouses sourceWarehouse ON sourceWarehouse.id = sd.warehouseId
+        JOIN factories sourceFactory ON sourceFactory.id = sourceWarehouse.factoryId
         JOIN sales_order_items soi ON soi.id = di.salesOrderItemId
         LEFT JOIN units u ON u.id = di.unitId
         LEFT JOIN products p ON p.id = COALESCE(soi.productId, soi.itemId)
           AND soi.itemType = 'PRODUCT'
         LEFT JOIN raw_materials rm ON rm.id = COALESCE(soi.productId, soi.itemId)
           AND soi.itemType = 'RAW_MATERIAL'
-        WHERE di.id = ?
+        WHERE sri.id = ? AND sr.id = ?
+          AND sd.salesOrderId = sr.salesOrderId
+          AND sd.warehouseId = sr.warehouseId
+          AND (sr.salesDeliveryId IS NULL OR sr.salesDeliveryId = sd.id)
+          AND $sourceReturnScope AND $sourceWarehouseScope
         LIMIT 1
         ''',
-        [item.sourceDeliveryItemId],
+        [...sourceArgs, ...sourceWarehouseScopeArgs],
       );
       final source = sourceRows.isEmpty
           ? <String, Object?>{}
@@ -378,33 +622,66 @@ class ReturnsQualityLocalDataSource {
       whereArgs: [row['salesOrderId']],
       limit: 1,
     );
-    final deliveryRows = await db.query(
-      'sales_deliveries',
-      columns: ['deliveryNumber'],
-      where: 'id = ?',
-      whereArgs: [row['salesDeliveryId']],
-      limit: 1,
+    final deliveryArgs = <Object?>[row['salesDeliveryId'], returnId];
+    final deliveryScope = _warehousePredicate(
+      'sourceWarehouse.id',
+      deliveryArgs,
     );
-    final destinationRows = await db.query(
-      'warehouses',
-      columns: ['name'],
-      where: 'id = ?',
-      whereArgs: [row['warehouseId']],
-      limit: 1,
+    final deliveryRows = await db.rawQuery('''
+      SELECT sd.deliveryNumber
+      FROM sales_deliveries sd
+      JOIN sales_returns sr ON sr.salesDeliveryId = sd.id
+      JOIN warehouses sourceWarehouse ON sourceWarehouse.id = sd.warehouseId
+      JOIN factories sourceFactory ON sourceFactory.id = sourceWarehouse.factoryId
+      WHERE sd.id = ? AND sr.id = ?
+        AND sd.salesOrderId = sr.salesOrderId
+        AND sd.warehouseId = sr.warehouseId
+        AND $deliveryScope
+      LIMIT 1
+      ''', deliveryArgs);
+    final destinationArgs = <Object?>[row['warehouseId']];
+    final destinationScope = _warehousePredicate('w.id', destinationArgs);
+    final destinationRows = await db.rawQuery('''
+      SELECT w.name
+      FROM warehouses w
+      JOIN factories f ON f.id = w.factoryId
+      WHERE w.id = ? AND $destinationScope
+      LIMIT 1
+      ''', destinationArgs);
+    final movementArgs = <Object?>[
+      'TRANSFER_IN',
+      'SALES_RETURN_ACCEPTED:$returnId:%',
+      returnId,
+    ];
+    final movementScope = _warehousePredicate(
+      'returnWarehouse.id',
+      movementArgs,
     );
-    final movementRows = await db.query(
-      'stock_transactions',
-      columns: ['id'],
-      where: 'transactionType = ? AND reference LIKE ?',
-      whereArgs: ['TRANSFER_IN', 'SALES_RETURN_ACCEPTED:$returnId:%'],
-    );
-    final journalRows = await db.query(
-      'journal_entries',
-      columns: ['entryNumber'],
-      where: 'referenceType = ? AND referenceId = ?',
-      whereArgs: ['SALES_RETURN', returnId],
-      limit: 1,
-    );
+    final movementRows = await db.rawQuery('''
+      SELECT movement.id
+      FROM stock_transactions movement
+      WHERE movement.transactionType = ? AND movement.reference LIKE ?
+        AND EXISTS (
+          SELECT 1 FROM sales_returns sr
+          JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+          WHERE sr.id = ? AND $movementScope
+        )
+      ''', movementArgs);
+    final journalArgs = <Object?>['SALES_RETURN', returnId, returnId];
+    final journalScope = _warehousePredicate('returnWarehouse.id', journalArgs);
+    final journalRows = await db.rawQuery('''
+      SELECT journal.entryNumber
+      FROM journal_entries journal
+      WHERE journal.referenceType = ? AND journal.referenceId = ?
+        AND EXISTS (
+          SELECT 1 FROM sales_returns sr
+          JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+          WHERE sr.id = ? AND $journalScope
+        )
+      LIMIT 1
+      ''', journalArgs);
     return SalesReturnWorkflowDetails(
       salesReturn: SalesReturn.fromMap({...row, 'items': items}),
       customerName: customerRows.isEmpty
@@ -991,21 +1268,109 @@ class ReturnsQualityLocalDataSource {
     String? sourceType,
   }) async {
     _security.require('QUALITY_VIEW');
+    final canViewSalesReturns = _security.can('RETURNS_VIEW');
+    if (sourceType == 'SALES_RETURN') {
+      _security.require('RETURNS_VIEW');
+    }
     final db = await _db;
-    final rows = await db.query(
-      'quality_inspections',
-      where: sourceType == null ? null : 'sourceType = ?',
-      whereArgs: sourceType == null ? null : [sourceType],
-      orderBy: 'inspectionDate DESC',
-    );
+    final whereArgs = <Object?>[];
+    final clauses = <String>[];
+    if (sourceType != null) {
+      clauses.add('inspection.sourceType = ?');
+      whereArgs.add(sourceType);
+    }
+    if (sourceType == null && !canViewSalesReturns) {
+      clauses.add("inspection.sourceType != 'SALES_RETURN'");
+    } else if (sourceType == 'SALES_RETURN' || canViewSalesReturns) {
+      final scopeArgs = <Object?>[];
+      final scope = _warehousePredicate('returnWarehouse.id', scopeArgs);
+      final inspectionScopeArgs = <Object?>[];
+      final inspectionScope = _warehousePredicate(
+        'inspectionWarehouse.id',
+        inspectionScopeArgs,
+      );
+      clauses.add('''(
+        inspection.sourceType != 'SALES_RETURN' OR EXISTS (
+          SELECT 1
+          FROM sales_returns sr
+          JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+          JOIN warehouses inspectionWarehouse
+            ON inspectionWarehouse.id = inspection.warehouseId
+          JOIN factories inspectionFactory
+            ON inspectionFactory.id = inspectionWarehouse.factoryId
+          WHERE sr.id = inspection.sourceId AND $scope AND $inspectionScope
+            AND (
+              sr.salesDeliveryId IS NULL OR EXISTS (
+                SELECT 1
+                FROM sales_deliveries sourceDelivery
+                JOIN warehouses sourceWarehouse
+                  ON sourceWarehouse.id = sourceDelivery.warehouseId
+                JOIN factories sourceFactory
+                  ON sourceFactory.id = sourceWarehouse.factoryId
+                WHERE sourceDelivery.id = sr.salesDeliveryId
+                  AND sourceDelivery.salesOrderId = sr.salesOrderId
+                  AND sourceDelivery.warehouseId = sr.warehouseId
+              )
+            )
+        )
+      )''');
+      whereArgs.addAll(scopeArgs);
+      whereArgs.addAll(inspectionScopeArgs);
+    }
+    final rows = await db.rawQuery('''
+      SELECT inspection.*
+      FROM quality_inspections inspection
+      ${clauses.isEmpty ? '' : 'WHERE ${clauses.join(' AND ')}'}
+      ORDER BY inspection.inspectionDate DESC
+      ''', whereArgs);
     final inspections = <QualityInspection>[];
     for (final row in rows) {
-      final items = await db.query(
-        'quality_inspection_items',
-        where: 'inspectionId = ?',
-        whereArgs: [row['id']],
-        orderBy: 'createdAt ASC, id ASC',
-      );
+      final itemArgs = <Object?>[row['id']];
+      var sourceScope = '1 = 1';
+      if (row['sourceType'] == 'SALES_RETURN') {
+        final returnScopeArgs = <Object?>[];
+        final returnScope = _warehousePredicate(
+          'returnWarehouse.id',
+          returnScopeArgs,
+        );
+        final inspectionScopeArgs = <Object?>[];
+        final inspectionScope = _warehousePredicate(
+          'inspectionWarehouse.id',
+          inspectionScopeArgs,
+        );
+        final sourceItemScopeArgs = <Object?>[];
+        final sourceItemScope = _salesReturnItemScopePredicate(
+          'inspectionItem.sourceReturnItemId',
+          sourceItemScopeArgs,
+        );
+        sourceScope =
+            '''EXISTS (
+          SELECT 1
+          FROM quality_inspections inspection
+          JOIN sales_returns sr
+            ON sr.id = inspection.sourceId AND inspection.sourceType = 'SALES_RETURN'
+          JOIN warehouses returnWarehouse ON returnWarehouse.id = sr.warehouseId
+          JOIN factories returnFactory ON returnFactory.id = returnWarehouse.factoryId
+          JOIN warehouses inspectionWarehouse
+            ON inspectionWarehouse.id = inspection.warehouseId
+          JOIN factories inspectionFactory
+            ON inspectionFactory.id = inspectionWarehouse.factoryId
+          WHERE inspection.id = ? AND $returnScope
+            AND $inspectionScope
+            AND $sourceItemScope
+        )''';
+        itemArgs.add(row['id']);
+        itemArgs.addAll(returnScopeArgs);
+        itemArgs.addAll(inspectionScopeArgs);
+        itemArgs.addAll(sourceItemScopeArgs);
+      }
+      final items = await db.rawQuery('''
+        SELECT inspectionItem.*
+        FROM quality_inspection_items inspectionItem
+        WHERE inspectionItem.inspectionId = ? AND $sourceScope
+        ORDER BY inspectionItem.createdAt ASC, inspectionItem.id ASC
+        ''', itemArgs);
       inspections.add(
         QualityInspection.fromMap(
           row,

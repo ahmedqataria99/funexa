@@ -4253,6 +4253,17 @@ void main() {
     'quality inspection read preserves a historical null source line',
     () async {
       final db = await FurnexaDatabase.instance.database;
+      await db.insert('sales_returns', {
+        'id': 'sr-legacy-source-line-$suffix',
+        'returnNumber': 'SR-LEGACY-SOURCE-LINE-$suffix',
+        'salesOrderId': 'sales-order-$suffix',
+        'customerId': customerId,
+        'warehouseId': warehouseId,
+        'returnDate': now.millisecondsSinceEpoch,
+        'status': 'PENDING',
+        'createdAt': now.millisecondsSinceEpoch,
+        'updatedAt': now.millisecondsSinceEpoch,
+      });
       await db.insert('quality_inspections', {
         'id': 'qi-legacy-source-line-$suffix',
         'inspectionNumber': 'QI-LEGACY-SOURCE-LINE-$suffix',

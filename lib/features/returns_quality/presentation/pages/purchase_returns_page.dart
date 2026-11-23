@@ -27,6 +27,7 @@ class _PurchaseReturnsPageState extends State<PurchaseReturnsPage> {
   late final ReturnsQualityLocalDataSource _dataSource =
       widget.dataSource ?? ReturnsQualityLocalDataSource(null, widget.security);
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _pageScrollController = ScrollController();
   List<PurchaseReturnWorkflowDetails> _returns = [];
   List<Map<String, Object?>> _suppliers = [];
   bool _loading = true;
@@ -49,6 +50,7 @@ class _PurchaseReturnsPageState extends State<PurchaseReturnsPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _pageScrollController.dispose();
     super.dispose();
   }
 
@@ -204,228 +206,231 @@ class _PurchaseReturnsPageState extends State<PurchaseReturnsPage> {
 
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.lg),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          l10n.purchaseReturns,
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        const SizedBox(height: AppSpacing.xs),
-                        Text(l10n.purchaseReturnsDescription),
-                      ],
+        child: SingleChildScrollView(
+          controller: _pageScrollController,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            l10n.purchaseReturns,
+                            style: Theme.of(context).textTheme.headlineSmall,
+                          ),
+                          const SizedBox(height: AppSpacing.xs),
+                          Text(l10n.purchaseReturnsDescription),
+                        ],
+                      ),
                     ),
-                  ),
-                  if (_canEdit)
-                    FurnexaButton(
-                      label: l10n.createPurchaseReturn,
-                      icon: Icons.add,
-                      onPressed: _create,
-                    ),
-                ],
-              ),
-              const SizedBox(height: AppSpacing.md),
-              Wrap(
-                spacing: AppSpacing.sm,
-                runSpacing: AppSpacing.sm,
-                children: [
-                  FurnexaKpiCard(
-                    title: l10n.totalReturns,
-                    value: '${_returns.length}',
-                    icon: Icons.assignment_return_outlined,
-                  ),
-                  FurnexaKpiCard(
-                    title: l10n.awaitingReceipt,
-                    value:
-                        '${_returns.where((value) => _workflowStatus(value) == 'PENDING_RECEIPT').length}',
-                    icon: Icons.move_to_inbox_outlined,
-                  ),
-                  if (widget.security.can('QUALITY_VIEW') || _canQualityEdit)
+                    if (_canEdit)
+                      FurnexaButton(
+                        label: l10n.createPurchaseReturn,
+                        icon: Icons.add,
+                        onPressed: _create,
+                      ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Wrap(
+                  spacing: AppSpacing.sm,
+                  runSpacing: AppSpacing.sm,
+                  children: [
                     FurnexaKpiCard(
-                      title: l10n.awaitingInspection,
+                      title: l10n.totalReturns,
+                      value: '${_returns.length}',
+                      icon: Icons.assignment_return_outlined,
+                    ),
+                    FurnexaKpiCard(
+                      title: l10n.awaitingReceipt,
                       value:
-                          '${_returns.where((value) => _workflowStatus(value) == 'PENDING_QC').length}',
-                      icon: Icons.fact_check_outlined,
+                          '${_returns.where((value) => _workflowStatus(value) == 'PENDING_RECEIPT').length}',
+                      icon: Icons.move_to_inbox_outlined,
                     ),
-                  FurnexaKpiCard(
-                    title: l10n.awaitingApproval,
-                    value:
-                        '${_returns.where((value) => _workflowStatus(value) == 'PENDING_APPROVAL').length}',
-                    icon: Icons.rule_folder_outlined,
-                  ),
-                  FurnexaKpiCard(
-                    title: l10n.awaitingHandover,
-                    value:
-                        '${_returns.where((value) => _workflowStatus(value) == 'APPROVED' || _workflowStatus(value) == 'PARTIALLY_HANDED_OVER').length}',
-                    icon: Icons.local_shipping_outlined,
-                  ),
-                  FurnexaKpiCard(
-                    title: l10n.completedStatus,
-                    value:
-                        '${_returns.where((value) => value.purchaseReturn.status == ReturnStatus.completed).length}',
-                    icon: Icons.task_alt_outlined,
-                  ),
-                ],
-              ),
-              const SizedBox(height: AppSpacing.md),
-              FurnexaTableToolbar(
-                title: l10n.purchaseReturns,
-                count: filtered.length,
-                search: SizedBox(
-                  width: 280,
-                  child: TextField(
-                    controller: _searchController,
-                    onChanged: (_) => setState(() => _page = 0),
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.search),
-                      hintText: l10n.searchPurchaseReturns,
-                      isDense: true,
+                    if (widget.security.can('QUALITY_VIEW') || _canQualityEdit)
+                      FurnexaKpiCard(
+                        title: l10n.awaitingInspection,
+                        value:
+                            '${_returns.where((value) => _workflowStatus(value) == 'PENDING_QC').length}',
+                        icon: Icons.fact_check_outlined,
+                      ),
+                    FurnexaKpiCard(
+                      title: l10n.awaitingApproval,
+                      value:
+                          '${_returns.where((value) => _workflowStatus(value) == 'PENDING_APPROVAL').length}',
+                      icon: Icons.rule_folder_outlined,
                     ),
-                  ),
+                    FurnexaKpiCard(
+                      title: l10n.awaitingHandover,
+                      value:
+                          '${_returns.where((value) => _workflowStatus(value) == 'APPROVED' || _workflowStatus(value) == 'PARTIALLY_HANDED_OVER').length}',
+                      icon: Icons.local_shipping_outlined,
+                    ),
+                    FurnexaKpiCard(
+                      title: l10n.completedStatus,
+                      value:
+                          '${_returns.where((value) => value.purchaseReturn.status == ReturnStatus.completed).length}',
+                      icon: Icons.task_alt_outlined,
+                    ),
+                  ],
                 ),
-                filters: [
-                  DropdownButton<String?>(
-                    value: _supplierFilter,
-                    hint: Text(l10n.supplierLabel),
-                    items: [
-                      DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text(l10n.allSuppliers),
+                const SizedBox(height: AppSpacing.md),
+                FurnexaTableToolbar(
+                  title: l10n.purchaseReturns,
+                  count: filtered.length,
+                  search: SizedBox(
+                    width: 280,
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: (_) => setState(() => _page = 0),
+                      decoration: InputDecoration(
+                        prefixIcon: const Icon(Icons.search),
+                        hintText: l10n.searchPurchaseReturns,
+                        isDense: true,
                       ),
-                      for (final supplier in _suppliers)
+                    ),
+                  ),
+                  filters: [
+                    DropdownButton<String?>(
+                      value: _supplierFilter,
+                      hint: Text(l10n.supplierLabel),
+                      items: [
                         DropdownMenuItem<String?>(
-                          value: supplier['id'] as String,
-                          child: Text(supplier['name'] as String),
+                          value: null,
+                          child: Text(l10n.allSuppliers),
                         ),
-                    ],
-                    onChanged: (value) => setState(() {
-                      _supplierFilter = value;
-                      _page = 0;
-                    }),
-                  ),
-                  DropdownButton<String?>(
-                    value: _statusFilter,
-                    hint: Text(l10n.allStatuses),
-                    items: [
-                      DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text(l10n.allStatuses),
-                      ),
-                      for (final status in const [
-                        'PENDING_RECEIPT',
-                        'PENDING_QC',
-                        'PENDING_APPROVAL',
-                        'APPROVED',
-                        'PARTIALLY_HANDED_OVER',
-                        'COMPLETED',
-                        'REJECTED',
-                        'CANCELLED',
-                      ])
+                        for (final supplier in _suppliers)
+                          DropdownMenuItem<String?>(
+                            value: supplier['id'] as String,
+                            child: Text(supplier['name'] as String),
+                          ),
+                      ],
+                      onChanged: (value) => setState(() {
+                        _supplierFilter = value;
+                        _page = 0;
+                      }),
+                    ),
+                    DropdownButton<String?>(
+                      value: _statusFilter,
+                      hint: Text(l10n.allStatuses),
+                      items: [
                         DropdownMenuItem<String?>(
-                          value: status,
-                          child: Text(_statusLabel(l10n, status)),
+                          value: null,
+                          child: Text(l10n.allStatuses),
                         ),
-                    ],
-                    onChanged: (value) => setState(() {
-                      _statusFilter = value;
-                      _page = 0;
-                    }),
-                  ),
-                  IconButton(
-                    tooltip: l10n.returnDate,
-                    onPressed: _chooseDateRange,
-                    icon: const Icon(Icons.date_range_outlined),
-                  ),
-                  if (_dateRange != null)
+                        for (final status in const [
+                          'PENDING_RECEIPT',
+                          'PENDING_QC',
+                          'PENDING_APPROVAL',
+                          'APPROVED',
+                          'PARTIALLY_HANDED_OVER',
+                          'COMPLETED',
+                          'REJECTED',
+                          'CANCELLED',
+                        ])
+                          DropdownMenuItem<String?>(
+                            value: status,
+                            child: Text(_statusLabel(l10n, status)),
+                          ),
+                      ],
+                      onChanged: (value) => setState(() {
+                        _statusFilter = value;
+                        _page = 0;
+                      }),
+                    ),
                     IconButton(
-                      tooltip: l10n.clearSearch,
-                      onPressed: () => setState(() => _dateRange = null),
-                      icon: const Icon(Icons.close),
+                      tooltip: l10n.returnDate,
+                      onPressed: _chooseDateRange,
+                      icon: const Icon(Icons.date_range_outlined),
                     ),
-                ],
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              Expanded(
-                child: FurnexaDataTable(
-                  columns: [
-                    FurnexaTableColumn(
-                      key: 'reference',
-                      label: l10n.purchaseReturnReference,
-                      flex: 2,
-                    ),
-                    FurnexaTableColumn(
-                      key: 'supplier',
-                      label: l10n.supplierLabel,
-                      flex: 2,
-                    ),
-                    FurnexaTableColumn(
-                      key: 'order',
-                      label: l10n.originalPurchaseOrder,
-                      flex: 2,
-                    ),
-                    FurnexaTableColumn(
-                      key: 'warehouse',
-                      label: l10n.sourceWarehouse,
-                      flex: 2,
-                    ),
-                    FurnexaTableColumn(key: 'date', label: l10n.returnDate),
-                    FurnexaTableColumn(
-                      key: 'requested',
-                      label: l10n.requestedReturnQuantity,
-                    ),
-                    FurnexaTableColumn(
-                      key: 'received',
-                      label: l10n.receivedQuantity,
-                    ),
-                    FurnexaTableColumn(
-                      key: 'status',
-                      label: l10n.status,
-                      cellBuilder: (context, row) => Chip(
-                        label: Text('${row['status']}'),
-                        visualDensity: VisualDensity.compact,
+                    if (_dateRange != null)
+                      IconButton(
+                        tooltip: l10n.clearSearch,
+                        onPressed: () => setState(() => _dateRange = null),
+                        icon: const Icon(Icons.close),
                       ),
-                    ),
                   ],
-                  rows: rows,
-                  rowId: (row) => row['id'] as String,
-                  loading: _loading,
-                  errorMessage: _error,
-                  onRetry: _load,
-                  emptyTitle: l10n.noPurchaseReturns,
-                  emptyDescription: l10n.noPurchaseReturnsDescription,
-                  actionsBuilder: (row) => [
-                    FurnexaTableAction(
-                      label: l10n.returnDetails,
-                      icon: Icons.open_in_new,
-                      onPressed: () {
-                        final detail = _returns.firstWhere(
-                          (value) => value.purchaseReturn.id == row['id'],
-                        );
-                        _open(detail);
-                      },
-                    ),
-                  ],
-                  pagination: FurnexaTablePagination(
-                    page: safePage,
-                    pageSize: _pageSize,
-                    total: filtered.length,
-                    onPageChanged: (page) => setState(() => _page = page),
-                    onPageSizeChanged: (pageSize) => setState(() {
-                      _pageSize = pageSize;
-                      _page = 0;
-                    }),
-                  ),
                 ),
-              ),
-            ],
+                const SizedBox(height: AppSpacing.sm),
+                FurnexaDataTable(
+                    verticalScrollable: false,
+                    columns: [
+                      FurnexaTableColumn(
+                        key: 'reference',
+                        label: l10n.purchaseReturnReference,
+                        flex: 2,
+                      ),
+                      FurnexaTableColumn(
+                        key: 'supplier',
+                        label: l10n.supplierLabel,
+                        flex: 2,
+                      ),
+                      FurnexaTableColumn(
+                        key: 'order',
+                        label: l10n.originalPurchaseOrder,
+                        flex: 2,
+                      ),
+                      FurnexaTableColumn(
+                        key: 'warehouse',
+                        label: l10n.sourceWarehouse,
+                        flex: 2,
+                      ),
+                      FurnexaTableColumn(key: 'date', label: l10n.returnDate),
+                      FurnexaTableColumn(
+                        key: 'requested',
+                        label: l10n.requestedReturnQuantity,
+                      ),
+                      FurnexaTableColumn(
+                        key: 'received',
+                        label: l10n.receivedQuantity,
+                      ),
+                      FurnexaTableColumn(
+                        key: 'status',
+                        label: l10n.status,
+                        cellBuilder: (context, row) => Chip(
+                          label: Text('${row['status']}'),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ),
+                    ],
+                    rows: rows,
+                    rowId: (row) => row['id'] as String,
+                    loading: _loading,
+                    errorMessage: _error,
+                    onRetry: _load,
+                    emptyTitle: l10n.noPurchaseReturns,
+                    emptyDescription: l10n.noPurchaseReturnsDescription,
+                    actionsBuilder: (row) => [
+                      FurnexaTableAction(
+                        label: l10n.returnDetails,
+                        icon: Icons.open_in_new,
+                        onPressed: () {
+                          final detail = _returns.firstWhere(
+                            (value) => value.purchaseReturn.id == row['id'],
+                          );
+                          _open(detail);
+                        },
+                      ),
+                    ],
+                    pagination: FurnexaTablePagination(
+                      page: safePage,
+                      pageSize: _pageSize,
+                      total: filtered.length,
+                      onPageChanged: (page) => setState(() => _page = page),
+                      onPageSizeChanged: (pageSize) => setState(() {
+                        _pageSize = pageSize;
+                        _page = 0;
+                      }),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
