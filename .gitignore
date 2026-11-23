@@ -12,6 +12,35 @@
 .swiftpm/
 migrate_working_dir/
 
+# Local databases, backups, and generated business data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backups/
+**/backups/
+**/generated_data/
+
+# Local credentials and environment configuration
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+**/secrets/
+
+# Python virtual environments and generated artifacts
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+
 # IntelliJ related
 *.iml
 *.ipr
