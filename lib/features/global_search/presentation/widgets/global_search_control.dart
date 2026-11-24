@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/features/global_search/domain/entities/global_search_entities.dart';
 import 'package:furnexa/features/global_search/presentation/controllers/global_search_controller.dart';
@@ -387,10 +387,7 @@ class _ResultTile extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(
-                isRtl ? Icons.chevron_left : Icons.chevron_right,
-                size: 18,
-              ),
+              Icon(isRtl ? Icons.chevron_left : Icons.chevron_right, size: 18),
             ],
           ),
         ),

@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter/painting.dart' as flutter_painting;
 
 class DemandForecastPanel extends StatelessWidget {
   const DemandForecastPanel({
@@ -480,21 +481,27 @@ class _ForecastChartPainter extends CustomPainter {
       ? '${value.substring(8, 10)}/${value.substring(5, 7)}/${value.substring(0, 4)}'
       : value;
 
-  static void _paintText(
-    Canvas canvas,
-    String value,
-    TextStyle style,
-    TextDirection direction,
-    Offset offset, {
-    double maxWidth = 120,
-  }) {
-    final painter = TextPainter(
-      text: TextSpan(text: value, style: style),
-      textDirection: direction,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: maxWidth);
-    painter.paint(canvas, offset);
+      static void _paintText(
+        Canvas canvas,
+        String value,
+        TextStyle style,
+        TextDirection direction,
+        Offset offset, {
+        double maxWidth = 120,
+      }) {
+      final painter = flutter_painting.TextPainter(
+        text: flutter_painting.TextSpan(
+          text: value,
+          style: style,
+        ),
+        maxLines: 1,
+      )
+        ..textDirection = direction
+        ..ellipsis = '…'
+        ..layout(maxWidth: maxWidth);
+
+      painter.paint(canvas, offset);
+      painter.dispose();
   }
 
   @override

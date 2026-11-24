@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_button.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_card.dart';
@@ -293,71 +293,68 @@ class _SalesReturnsPageState extends State<SalesReturnsPage> {
                   ],
                 ),
                 FurnexaDataTable(
-                    verticalScrollable: false,
-                    columns: [
-                      FurnexaTableColumn(
-                        key: 'returnNumber',
-                        label: l10n.returnNumber,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'source',
-                        label: l10n.originalSale,
-                        flex: 3,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'customer',
-                        label: l10n.customer,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(key: 'date', label: l10n.returnDate),
-                      FurnexaTableColumn(
-                        key: 'updated',
-                        label: l10n.lastUpdated,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'quantity',
-                        label: l10n.totalReturnedQuantity,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'status',
-                        label: l10n.status,
-                        cellBuilder: (context, row) => Chip(
-                          label: Text('${row['status']}'),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ),
-                    ],
-                    rows: rows,
-                    rowId: (row) => row['id'] as String,
-                    loading: _loading,
-                    errorMessage: _error,
-                    onRetry: _load,
-                    emptyTitle: l10n.noSalesReturns,
-                    emptyDescription: l10n.noSalesReturnsDescription,
-                    actionsBuilder: (row) => [
-                      FurnexaTableAction(
-                        label: l10n.returnDetails,
-                        icon: Icons.open_in_new,
-                        onPressed: () {
-                          final match = _returns.firstWhere(
-                            (detail) => detail.salesReturn.id == row['id'],
-                          );
-                          _open(match);
-                        },
-                      ),
-                    ],
-                    pagination: FurnexaTablePagination(
-                      page: safePage,
-                      pageSize: _pageSize,
-                      total: filtered.length,
-                      onPageChanged: (page) => setState(() => _page = page),
-                      onPageSizeChanged: (pageSize) => setState(() {
-                        _pageSize = pageSize;
-                        _page = 0;
-                      }),
+                  verticalScrollable: false,
+                  columns: [
+                    FurnexaTableColumn(
+                      key: 'returnNumber',
+                      label: l10n.returnNumber,
+                      flex: 2,
                     ),
+                    FurnexaTableColumn(
+                      key: 'source',
+                      label: l10n.originalSale,
+                      flex: 3,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'customer',
+                      label: l10n.customer,
+                      flex: 2,
+                    ),
+                    FurnexaTableColumn(key: 'date', label: l10n.returnDate),
+                    FurnexaTableColumn(key: 'updated', label: l10n.lastUpdated),
+                    FurnexaTableColumn(
+                      key: 'quantity',
+                      label: l10n.totalReturnedQuantity,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'status',
+                      label: l10n.status,
+                      cellBuilder: (context, row) => Chip(
+                        label: Text('${row['status']}'),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                  rows: rows,
+                  rowId: (row) => row['id'] as String,
+                  loading: _loading,
+                  errorMessage: _error,
+                  onRetry: _load,
+                  emptyTitle: l10n.noSalesReturns,
+                  emptyDescription: l10n.noSalesReturnsDescription,
+                  actionsBuilder: (row) => [
+                    FurnexaTableAction(
+                      label: l10n.returnDetails,
+                      icon: Icons.open_in_new,
+                      onPressed: () {
+                        final match = _returns.firstWhere(
+                          (detail) => detail.salesReturn.id == row['id'],
+                        );
+                        _open(match);
+                      },
+                    ),
+                  ],
+                  pagination: FurnexaTablePagination(
+                    page: safePage,
+                    pageSize: _pageSize,
+                    total: filtered.length,
+                    onPageChanged: (page) => setState(() => _page = page),
+                    onPageSizeChanged: (pageSize) => setState(() {
+                      _pageSize = pageSize;
+                      _page = 0;
+                    }),
                   ),
+                ),
               ],
             ),
           ),

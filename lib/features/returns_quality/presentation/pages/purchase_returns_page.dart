@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_button.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_card.dart';
@@ -359,76 +359,76 @@ class _PurchaseReturnsPageState extends State<PurchaseReturnsPage> {
                 ),
                 const SizedBox(height: AppSpacing.sm),
                 FurnexaDataTable(
-                    verticalScrollable: false,
-                    columns: [
-                      FurnexaTableColumn(
-                        key: 'reference',
-                        label: l10n.purchaseReturnReference,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'supplier',
-                        label: l10n.supplierLabel,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'order',
-                        label: l10n.originalPurchaseOrder,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'warehouse',
-                        label: l10n.sourceWarehouse,
-                        flex: 2,
-                      ),
-                      FurnexaTableColumn(key: 'date', label: l10n.returnDate),
-                      FurnexaTableColumn(
-                        key: 'requested',
-                        label: l10n.requestedReturnQuantity,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'received',
-                        label: l10n.receivedQuantity,
-                      ),
-                      FurnexaTableColumn(
-                        key: 'status',
-                        label: l10n.status,
-                        cellBuilder: (context, row) => Chip(
-                          label: Text('${row['status']}'),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ),
-                    ],
-                    rows: rows,
-                    rowId: (row) => row['id'] as String,
-                    loading: _loading,
-                    errorMessage: _error,
-                    onRetry: _load,
-                    emptyTitle: l10n.noPurchaseReturns,
-                    emptyDescription: l10n.noPurchaseReturnsDescription,
-                    actionsBuilder: (row) => [
-                      FurnexaTableAction(
-                        label: l10n.returnDetails,
-                        icon: Icons.open_in_new,
-                        onPressed: () {
-                          final detail = _returns.firstWhere(
-                            (value) => value.purchaseReturn.id == row['id'],
-                          );
-                          _open(detail);
-                        },
-                      ),
-                    ],
-                    pagination: FurnexaTablePagination(
-                      page: safePage,
-                      pageSize: _pageSize,
-                      total: filtered.length,
-                      onPageChanged: (page) => setState(() => _page = page),
-                      onPageSizeChanged: (pageSize) => setState(() {
-                        _pageSize = pageSize;
-                        _page = 0;
-                      }),
+                  verticalScrollable: false,
+                  columns: [
+                    FurnexaTableColumn(
+                      key: 'reference',
+                      label: l10n.purchaseReturnReference,
+                      flex: 2,
                     ),
+                    FurnexaTableColumn(
+                      key: 'supplier',
+                      label: l10n.supplierLabel,
+                      flex: 2,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'order',
+                      label: l10n.originalPurchaseOrder,
+                      flex: 2,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'warehouse',
+                      label: l10n.sourceWarehouse,
+                      flex: 2,
+                    ),
+                    FurnexaTableColumn(key: 'date', label: l10n.returnDate),
+                    FurnexaTableColumn(
+                      key: 'requested',
+                      label: l10n.requestedReturnQuantity,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'received',
+                      label: l10n.receivedQuantity,
+                    ),
+                    FurnexaTableColumn(
+                      key: 'status',
+                      label: l10n.status,
+                      cellBuilder: (context, row) => Chip(
+                        label: Text('${row['status']}'),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                  rows: rows,
+                  rowId: (row) => row['id'] as String,
+                  loading: _loading,
+                  errorMessage: _error,
+                  onRetry: _load,
+                  emptyTitle: l10n.noPurchaseReturns,
+                  emptyDescription: l10n.noPurchaseReturnsDescription,
+                  actionsBuilder: (row) => [
+                    FurnexaTableAction(
+                      label: l10n.returnDetails,
+                      icon: Icons.open_in_new,
+                      onPressed: () {
+                        final detail = _returns.firstWhere(
+                          (value) => value.purchaseReturn.id == row['id'],
+                        );
+                        _open(detail);
+                      },
+                    ),
+                  ],
+                  pagination: FurnexaTablePagination(
+                    page: safePage,
+                    pageSize: _pageSize,
+                    total: filtered.length,
+                    onPageChanged: (page) => setState(() => _page = page),
+                    onPageSizeChanged: (pageSize) => setState(() {
+                      _pageSize = pageSize;
+                      _page = 0;
+                    }),
                   ),
+                ),
               ],
             ),
           ),

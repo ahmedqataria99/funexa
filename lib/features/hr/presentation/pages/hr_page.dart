@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/shared/widgets/furnexa_form.dart';
 import 'package:furnexa/features/factory_structure/data/repositories/factory_structure_repository_impl.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/production_stage.dart';

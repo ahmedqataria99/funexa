@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/core/theme/app_theme.dart';
@@ -31,7 +31,9 @@ class NotificationCard extends StatelessWidget {
     return Card(
       color: notification.isRead
           ? null
-          : Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .25),
+          : Theme.of(
+              context,
+            ).colorScheme.primaryContainer.withValues(alpha: .25),
       child: ListTile(
         onTap: onOpen,
         leading: CircleAvatar(

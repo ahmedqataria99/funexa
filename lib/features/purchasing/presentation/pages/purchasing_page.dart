@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/database/furnexa_database_diagnostics.dart';
 import 'package:furnexa/core/theme/app_theme.dart';
 import 'package:furnexa/features/accounting/data/repositories/accounting_repository_impl.dart';

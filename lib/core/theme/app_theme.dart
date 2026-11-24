@@ -1,5 +1,6 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/material.dart' as flutter;
 
 class AppTheme {
   const AppTheme._();
@@ -80,46 +81,48 @@ class AppTheme {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
     ),
-    textTheme: GoogleFonts.cairoTextTheme().copyWith(
-      displayLarge: GoogleFonts.cairo(
-        fontWeight: FontWeight.w700,
-        color: lightTextPrimary,
-        fontSize: 32,
-      ),
-      headlineLarge: GoogleFonts.cairo(
-        fontWeight: FontWeight.w700,
-        color: lightTextPrimary,
-        fontSize: 28,
-      ),
-      headlineMedium: GoogleFonts.cairo(
-        fontWeight: FontWeight.w700,
-        color: lightTextPrimary,
-        fontSize: 24,
-      ),
-      titleLarge: GoogleFonts.cairo(
-        fontWeight: FontWeight.w700,
-        color: lightTextPrimary,
-        fontSize: 20,
-      ),
-      titleMedium: GoogleFonts.cairo(
-        fontWeight: FontWeight.w600,
-        color: lightTextPrimary,
-        fontSize: 18,
-      ),
-      bodyLarge: GoogleFonts.cairo(
-        fontWeight: FontWeight.w500,
-        color: lightTextPrimary,
-        fontSize: 16,
-      ),
-      bodyMedium: GoogleFonts.cairo(
-        fontWeight: FontWeight.w400,
-        color: lightTextSecondary,
-        fontSize: 14,
-      ),
-      labelLarge: GoogleFonts.cairo(
-        fontWeight: FontWeight.w600,
-        color: lightTextPrimary,
-        fontSize: 15,
+    textTheme: _toMaterialTextTheme(
+      GoogleFonts.cairoTextTheme().copyWith(
+        displayLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: lightTextPrimary,
+          fontSize: 32,
+        ),
+        headlineLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: lightTextPrimary,
+          fontSize: 28,
+        ),
+        headlineMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: lightTextPrimary,
+          fontSize: 24,
+        ),
+        titleLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: lightTextPrimary,
+          fontSize: 20,
+        ),
+        titleMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w600,
+          color: lightTextPrimary,
+          fontSize: 18,
+        ),
+        bodyLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w500,
+          color: lightTextPrimary,
+          fontSize: 16,
+        ),
+        bodyMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w400,
+          color: lightTextSecondary,
+          fontSize: 14,
+        ),
+        labelLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w600,
+          color: lightTextPrimary,
+          fontSize: 15,
+        ),
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
@@ -211,51 +214,52 @@ class AppTheme {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
     ),
-    textTheme:
-        GoogleFonts.cairoTextTheme(
-          ThemeData(brightness: Brightness.dark).textTheme,
-        ).copyWith(
-          displayLarge: GoogleFonts.cairo(
-            fontWeight: FontWeight.w700,
-            color: darkTextPrimary,
-            fontSize: 32,
-          ),
-          headlineLarge: GoogleFonts.cairo(
-            fontWeight: FontWeight.w700,
-            color: darkTextPrimary,
-            fontSize: 28,
-          ),
-          headlineMedium: GoogleFonts.cairo(
-            fontWeight: FontWeight.w700,
-            color: darkTextPrimary,
-            fontSize: 24,
-          ),
-          titleLarge: GoogleFonts.cairo(
-            fontWeight: FontWeight.w700,
-            color: darkTextPrimary,
-            fontSize: 20,
-          ),
-          titleMedium: GoogleFonts.cairo(
-            fontWeight: FontWeight.w600,
-            color: darkTextPrimary,
-            fontSize: 18,
-          ),
-          bodyLarge: GoogleFonts.cairo(
-            fontWeight: FontWeight.w500,
-            color: darkTextPrimary,
-            fontSize: 16,
-          ),
-          bodyMedium: GoogleFonts.cairo(
-            fontWeight: FontWeight.w400,
-            color: darkTextSecondary,
-            fontSize: 14,
-          ),
-          labelLarge: GoogleFonts.cairo(
-            fontWeight: FontWeight.w600,
-            color: darkTextPrimary,
-            fontSize: 15,
-          ),
+    textTheme: _toMaterialTextTheme(
+      GoogleFonts.cairoTextTheme(
+        flutter.ThemeData(brightness: Brightness.dark).textTheme,
+      ).copyWith(
+        displayLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: darkTextPrimary,
+          fontSize: 32,
         ),
+        headlineLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: darkTextPrimary,
+          fontSize: 28,
+        ),
+        headlineMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: darkTextPrimary,
+          fontSize: 24,
+        ),
+        titleLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w700,
+          color: darkTextPrimary,
+          fontSize: 20,
+        ),
+        titleMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w600,
+          color: darkTextPrimary,
+          fontSize: 18,
+        ),
+        bodyLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w500,
+          color: darkTextPrimary,
+          fontSize: 16,
+        ),
+        bodyMedium: GoogleFonts.cairo(
+          fontWeight: FontWeight.w400,
+          color: darkTextSecondary,
+          fontSize: 14,
+        ),
+        labelLarge: GoogleFonts.cairo(
+          fontWeight: FontWeight.w600,
+          color: darkTextPrimary,
+          fontSize: 15,
+        ),
+      ),
+    ),
     inputDecorationTheme: InputDecorationTheme(
       fillColor: darkSurface,
       filled: true,
@@ -296,5 +300,23 @@ class AppTheme {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     ),
+  );
+
+  static TextTheme _toMaterialTextTheme(flutter.TextTheme source) => TextTheme(
+    displayLarge: source.displayLarge,
+    displayMedium: source.displayMedium,
+    displaySmall: source.displaySmall,
+    headlineLarge: source.headlineLarge,
+    headlineMedium: source.headlineMedium,
+    headlineSmall: source.headlineSmall,
+    titleLarge: source.titleLarge,
+    titleMedium: source.titleMedium,
+    titleSmall: source.titleSmall,
+    bodyLarge: source.bodyLarge,
+    bodyMedium: source.bodyMedium,
+    bodySmall: source.bodySmall,
+    labelLarge: source.labelLarge,
+    labelMedium: source.labelMedium,
+    labelSmall: source.labelSmall,
   );
 }

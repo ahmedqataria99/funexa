@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:furnexa/core/localization/app_localizations.dart';
 import 'package:furnexa/features/ai/data/local_ai_process_bridge.dart';
 import 'package:furnexa/features/ai/data/local_ai_runtime.dart';

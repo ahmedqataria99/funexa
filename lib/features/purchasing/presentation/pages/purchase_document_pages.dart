@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:furnexa/features/accounting/domain/entities/accounting_entities.dart';
 import 'package:furnexa/features/factory_structure/domain/entities/warehouse.dart';
