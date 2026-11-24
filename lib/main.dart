@@ -1,7 +1,8 @@
 import 'dart:async';
 
-import 'package:material_ui/material_ui.dart' hide GlobalMaterialLocalizations;
-import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_localizations/flutter_localizations.dart'
+    hide GlobalMaterialLocalizations;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:furnexa/core/constants/app_constants.dart';

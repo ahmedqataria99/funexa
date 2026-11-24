@@ -481,27 +481,25 @@ class _ForecastChartPainter extends CustomPainter {
       ? '${value.substring(8, 10)}/${value.substring(5, 7)}/${value.substring(0, 4)}'
       : value;
 
-      static void _paintText(
-        Canvas canvas,
-        String value,
-        TextStyle style,
-        TextDirection direction,
-        Offset offset, {
-        double maxWidth = 120,
-      }) {
-      final painter = flutter_painting.TextPainter(
-        text: flutter_painting.TextSpan(
-          text: value,
-          style: style,
-        ),
-        maxLines: 1,
-      )
-        ..textDirection = direction
-        ..ellipsis = '…'
-        ..layout(maxWidth: maxWidth);
+  static void _paintText(
+    Canvas canvas,
+    String value,
+    TextStyle style,
+    TextDirection direction,
+    Offset offset, {
+    double maxWidth = 120,
+  }) {
+    final painter =
+        flutter_painting.TextPainter(
+            text: flutter_painting.TextSpan(text: value, style: style),
+            maxLines: 1,
+          )
+          ..textDirection = direction
+          ..ellipsis = '…'
+          ..layout(maxWidth: maxWidth);
 
-      painter.paint(canvas, offset);
-      painter.dispose();
+    painter.paint(canvas, offset);
+    painter.dispose();
   }
 
   @override
